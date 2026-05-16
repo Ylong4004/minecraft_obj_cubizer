@@ -1,29 +1,29 @@
 {
 	"1.0.0": {
-		"title": "1.0.0",
+		"title": "1.0.0 / 首个稳定版本",
 		"date": "2026-05-16",
 		"author": "Ylong",
 		"categories": [
 			{
-				"title": "Features",
+				"title": "Features / 功能",
 				"list": [
-					"Initial stable release",
-					"Import Minecraft-style OBJ building exports as Blockbench Java cubes",
-					"Read MTL files and load linked PNG textures for preview",
-					"Add imported cubes to the current project when a project is open",
-					"Create a Java Block project automatically when no project is open",
-					"Save and reopen plugin import settings",
-					"Apply texture namespace, texture folder, texture size, and cullface settings to imported content",
-					"Export imported OBJ textures into a resource pack folder",
-					"Patch Java model texture paths with explicit namespaces during export"
+					"Initial stable release / 首个稳定版本",
+					"Import Minecraft-style OBJ building exports as Blockbench Java cubes / 将 Minecraft 风格建筑 OBJ 导入为 Blockbench Java 方块",
+					"Read MTL files and load linked PNG textures for preview / 读取 MTL 文件并加载关联 PNG 贴图用于预览",
+					"Add imported cubes to the current project when a project is open / 当前已有项目时，把导入方块加入当前项目",
+					"Create a Java Block project automatically when no project is open / 当前没有项目时，可自动创建 Java Block 项目",
+					"Save and reopen plugin import settings / 保存并复用插件导入设置",
+					"Apply texture namespace, texture folder, texture size, and cullface settings to imported content / 将贴图命名空间、贴图文件夹、贴图尺寸和 cullface 设置应用到已导入内容",
+					"Export imported OBJ textures into a resource pack folder / 将导入的 OBJ 贴图导出到资源包目录",
+					"Patch Java model texture paths with explicit namespaces during export / 导出 Java 模型时自动补全带命名空间的贴图路径"
 				]
 			},
 			{
-				"title": "Safety",
+				"title": "Safety / 安全提示",
 				"list": [
-					"Warn when generated model coordinates exceed the common Java Block/Item coordinate range",
-					"Warn when an import is expected to create more than 5,000 cubes",
-					"Show a stronger warning for imports expected to create 10,000 or more cubes"
+					"Warn when generated model coordinates exceed the common Java Block/Item coordinate range / 当生成坐标超出 Java Block/Item 常见范围时给出提示",
+					"Warn when an import is expected to create more than 5,000 cubes / 当预计生成超过 5,000 个方块时提示性能风险",
+					"Show a stronger warning for imports expected to create 10,000 or more cubes / 当预计生成 10,000 个或更多方块时给出更强提醒"
 				]
 			}
 		]

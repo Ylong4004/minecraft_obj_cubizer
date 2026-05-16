@@ -23,6 +23,25 @@
 
 ---
 
+## English Quick Start
+
+Minecraft OBJ Cubizer converts Minecraft building OBJ exports into textured Java Block/Item cube models in Blockbench.
+
+Recommended workflow:
+
+1. Export the Minecraft building as OBJ with Mineways or a similar tool.
+2. Keep the `.obj`, `.mtl`, and texture files in their original exported folder structure.
+3. Load `minecraft_obj_cubizer/minecraft_obj_cubizer.js` in Blockbench.
+4. Use `File > Import > Import Minecraft OBJ as Cubes`.
+5. Keep `OBJ block scale` at `1` for most Mineways exports.
+6. Set the texture namespace and texture folder for your resource pack.
+7. Export the Java Block/Item JSON.
+8. Use `File > Export > Export OBJ Textures to Resource Pack` to copy textures.
+
+Large imports may slow Blockbench down. The plugin warns above 5,000 generated cubes and shows a stronger warning above 10,000 generated cubes.
+
+---
+
 ## 【适合与不适合】
 
 | 类型 | 说明 |
