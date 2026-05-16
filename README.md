@@ -21,24 +21,9 @@
 
 插件会尽量把轴对齐的四边形面重组成 Blockbench 方块，并保留对应贴图，方便后续交给 Animated Java 做原版动画。
 
----
 
-## English Quick Start
-
-Minecraft OBJ Cubizer converts Minecraft building OBJ exports into textured Java Block/Item cube models in Blockbench.
-
-Recommended workflow:
-
-1. Export the Minecraft building as OBJ with Mineways or a similar tool.
-2. Keep the `.obj`, `.mtl`, and texture files in their original exported folder structure.
-3. Load `minecraft_obj_cubizer/minecraft_obj_cubizer.js` in Blockbench.
-4. Use `File > Import > Import Minecraft OBJ as Cubes`.
-5. Keep `OBJ block scale` at `1` for most Mineways exports.
-6. Set the texture namespace and texture folder for your resource pack.
-7. Export the Java Block/Item JSON.
-8. Use `File > Export > Export OBJ Textures to Resource Pack` to copy textures.
-
-Large imports may slow Blockbench down. The plugin warns above 5,000 generated cubes and shows a stronger warning above 10,000 generated cubes.
+该插件其他下载链接：
+https://treehey.github.io/Fimel/#/works/tools
 
 ---
 
@@ -87,15 +72,8 @@ minecraft_obj_cubizer/minecraft_obj_cubizer.js
 
 加载成功后，Blockbench 的文件菜单里会出现新的导入和导出功能。
 
----
 
-## 【相关链接】
 
-另一个插件下载链接：
-
-```text
-https://treehey.github.io/Fimel/#/works/tools
-```
 
 ---
 
