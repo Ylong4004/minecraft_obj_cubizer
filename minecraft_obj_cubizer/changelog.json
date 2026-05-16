@@ -1,0 +1,31 @@
+{
+	"1.0.0": {
+		"title": "1.0.0",
+		"date": "2026-05-16",
+		"author": "Ylong",
+		"categories": [
+			{
+				"title": "Features",
+				"list": [
+					"Initial stable release",
+					"Import Minecraft-style OBJ building exports as Blockbench Java cubes",
+					"Read MTL files and load linked PNG textures for preview",
+					"Add imported cubes to the current project when a project is open",
+					"Create a Java Block project automatically when no project is open",
+					"Save and reopen plugin import settings",
+					"Apply texture namespace, texture folder, texture size, and cullface settings to imported content",
+					"Export imported OBJ textures into a resource pack folder",
+					"Patch Java model texture paths with explicit namespaces during export"
+				]
+			},
+			{
+				"title": "Safety",
+				"list": [
+					"Warn when generated model coordinates exceed the common Java Block/Item coordinate range",
+					"Warn when an import is expected to create more than 5,000 cubes",
+					"Show a stronger warning for imports expected to create 10,000 or more cubes"
+				]
+			}
+		]
+	}
+}

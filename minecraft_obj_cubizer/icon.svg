@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="Minecraft OBJ Cubizer">
+	<rect width="48" height="48" rx="8" fill="#242933"/>
+	<path d="M11 14L24 7L37 14L24 21L11 14Z" fill="#7CB342"/>
+	<path d="M11 14L24 21V36L11 29V14Z" fill="#558B2F"/>
+	<path d="M37 14L24 21V36L37 29V14Z" fill="#9CCC65"/>
+	<path d="M15 16L24 11L33 16L24 21L15 16Z" fill="#A5D6A7"/>
+	<path d="M8 35H40" stroke="#D7DEE8" stroke-width="3" stroke-linecap="round"/>
+	<path d="M31 30L37 35L31 40" fill="none" stroke="#D7DEE8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+	<path d="M17 30L11 35L17 40" fill="none" stroke="#D7DEE8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

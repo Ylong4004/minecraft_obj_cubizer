@@ -4,6 +4,8 @@
 	const EPSILON = 0.00001;
 	const JAVA_COORDINATE_MIN = -16;
 	const JAVA_COORDINATE_MAX = 32;
+	const CUBE_WARNING_COUNT = 5000;
+	const CUBE_DANGER_COUNT = 10000;
 	const TRANSLATION_PREFIX = `plugin.${PLUGIN_ID}.`;
 	const PROJECT_OPTIONS_PROPERTY = `${PLUGIN_ID}_options`;
 	const IMPORTED_PROPERTY = `${PLUGIN_ID}_imported`;
@@ -73,6 +75,7 @@
 			[TRANSLATION_PREFIX + 'message.no_project_to_import']: 'No project is open. Enable automatic Java Block project creation in the cubizer settings, or create/open a project before importing.',
 			[TRANSLATION_PREFIX + 'message.empty_obj']: 'The selected OBJ file does not contain readable vertices and faces.',
 			[TRANSLATION_PREFIX + 'message.no_cubes']: 'The OBJ was readable, but no axis-aligned cube faces could be converted.',
+			[TRANSLATION_PREFIX + 'message.cube_count_warning']: 'This OBJ will create %0 Blockbench cubes.\n\nRecommended range: up to %1 cubes.\nHeavy range: %2+ cubes may make Blockbench slow or unresponsive.\n\nFor very large Minecraft buildings, consider splitting the OBJ into smaller parts before importing.',
 			[TRANSLATION_PREFIX + 'message.bounds_warning']: 'The current scale %0 produces model coordinates outside the common Java Block/Item range -16 to 32.\n\nCurrent bounds:\n%1\n\nRecommended scale: %2\nRecommended bounds:\n%3\n\nFor Minecraft building OBJ files, scale 1 usually keeps one Minecraft block as one Blockbench unit. Scale 16 is normally too large for Java model JSON.',
 			[TRANSLATION_PREFIX + 'message.summary']: 'Imported %0 cubes from %1 OBJ faces.\n\nTextures: %2\nSkipped non-cube faces: %3\n\nUse File > Export > Java Block/Item Model to save the JSON. Use File > Export > Export OBJ Textures to Resource Pack to copy the PNG textures.',
 			[TRANSLATION_PREFIX + 'message.settings_saved']: 'Settings saved. Updated textures: %0. Updated cubes: %1.',
@@ -109,6 +112,7 @@
 			[TRANSLATION_PREFIX + 'message.no_project_to_import']: '当前没有打开项目。请在转换器设置中开启自动创建 Java Block 项目，或先创建/打开一个项目再导入。',
 			[TRANSLATION_PREFIX + 'message.empty_obj']: '所选 OBJ 文件中没有可读取的顶点和面。',
 			[TRANSLATION_PREFIX + 'message.no_cubes']: 'OBJ 可以读取，但没有找到可转换的轴对齐方块面。',
+			[TRANSLATION_PREFIX + 'message.cube_count_warning']: '这个 OBJ 预计会生成 %0 个 Blockbench 方块。\n\n推荐范围：最多 %1 个方块。\n较重范围：%2 个以上可能会让 Blockbench 明显变慢，甚至无响应。\n\n如果是很大的 Minecraft 建筑，建议先把 OBJ 拆成几个部分再分别导入。',
 			[TRANSLATION_PREFIX + 'message.bounds_warning']: '当前缩放 %0 会生成超出 Java Block/Item 常见范围 -16 到 32 的模型坐标。\n\n当前范围：\n%1\n\n推荐缩放：%2\n推荐范围：\n%3\n\n对于 Minecraft 建筑 OBJ，缩放 1 通常表示一个 Minecraft 方块等于一个 Blockbench 单位；缩放 16 对 Java 模型 JSON 通常太大。',
 			[TRANSLATION_PREFIX + 'message.summary']: '已从 %1 个 OBJ 面导入 %0 个方块。\n\n贴图：%2\n跳过的非方块面：%3\n\n使用“文件 > 导出 > Java Block/Item Model”保存 JSON；使用“文件 > 导出 > 导出 OBJ 贴图到资源包”复制 PNG 贴图。',
 			[TRANSLATION_PREFIX + 'message.settings_saved']: '设置已保存。已更新贴图：%0。已更新方块：%1。',
@@ -145,6 +149,7 @@
 			[TRANSLATION_PREFIX + 'message.no_project_to_import']: '目前沒有開啟專案。請在轉換器設定中啟用自動建立 Java Block 專案，或先建立/開啟一個專案再匯入。',
 			[TRANSLATION_PREFIX + 'message.empty_obj']: '所選 OBJ 檔案中沒有可讀取的頂點和面。',
 			[TRANSLATION_PREFIX + 'message.no_cubes']: 'OBJ 可以讀取，但沒有找到可轉換的軸對齊方塊面。',
+			[TRANSLATION_PREFIX + 'message.cube_count_warning']: '這個 OBJ 預計會生成 %0 個 Blockbench 方塊。\n\n推薦範圍：最多 %1 個方塊。\n較重範圍：%2 個以上可能會讓 Blockbench 明顯變慢，甚至無回應。\n\n如果是很大的 Minecraft 建築，建議先把 OBJ 拆成幾個部分再分別匯入。',
 			[TRANSLATION_PREFIX + 'message.bounds_warning']: '目前縮放 %0 會生成超出 Java Block/Item 常見範圍 -16 到 32 的模型座標。\n\n目前範圍：\n%1\n\n推薦縮放：%2\n推薦範圍：\n%3\n\n對於 Minecraft 建築 OBJ，縮放 1 通常表示一個 Minecraft 方塊等於一個 Blockbench 單位；縮放 16 對 Java 模型 JSON 通常太大。',
 			[TRANSLATION_PREFIX + 'message.summary']: '已從 %1 個 OBJ 面匯入 %0 個方塊。\n\n貼圖：%2\n略過的非方塊面：%3\n\n使用「File > Export > Java Block/Item Model」儲存 JSON；使用「File > Export > 匯出 OBJ 貼圖到資源包」複製 PNG 貼圖。',
 			[TRANSLATION_PREFIX + 'message.settings_saved']: '設定已儲存。已更新貼圖：%0。已更新方塊：%1。',
@@ -761,6 +766,32 @@
 		return Math.max(Math.floor(scale * 10000) / 10000, 0.001);
 	}
 
+	function confirmCubeCount(cuboids) {
+		let count = cuboids.length;
+		if (count <= CUBE_WARNING_COUNT) return Promise.resolve(true);
+
+		return new Promise(resolve => {
+			Blockbench.showMessageBox({
+				title: translate('title'),
+				icon: count >= CUBE_DANGER_COUNT ? 'error' : 'warning',
+				width: 560,
+				message: translate('message.cube_count_warning', [
+					count,
+					CUBE_WARNING_COUNT,
+					CUBE_DANGER_COUNT
+				]),
+				buttons: [
+					translate('button.continue_anyway'),
+					'dialog.cancel'
+				],
+				confirm: 0,
+				cancel: 1
+			}, result => {
+				resolve(result === 0);
+			});
+		});
+	}
+
 	function confirmJavaCoordinateRange(groups, options) {
 		let bounds = getScaledCoordinateBounds(groups, options, options.scale);
 		if (!exceedsJavaCoordinateRange(bounds)) return Promise.resolve(true);
@@ -1099,6 +1130,7 @@
 				});
 				return;
 			}
+			if (!await confirmCubeCount(cuboids)) return;
 			if (!await confirmJavaCoordinateRange(cuboids, options)) return;
 
 			if (!Project) {
@@ -1305,8 +1337,9 @@
 		about: PLUGIN_ABOUT,
 		icon: 'view_in_ar',
 		tags: ['Minecraft', 'Java Edition', 'Import'],
-		version: '0.1.3',
+		version: '1.0.0',
 		min_version: '4.8.0',
+		has_changelog: true,
 		variant: 'desktop',
 		onload() {
 			registerProperties();

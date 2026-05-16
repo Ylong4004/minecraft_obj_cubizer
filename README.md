@@ -2,6 +2,7 @@
 
 > 插件名：Minecraft OBJ 方块转换器 / Minecraft OBJ Cubizer  
 > 作者：Ylong  
+> 版本：1.0.0  
 > 适用：Blockbench 桌面版、Minecraft Java 版资源包模型、Animated Java 原版动画流程
 
 ---
@@ -62,10 +63,20 @@ helicopter_obj/
 4. 选择插件文件：
 
 ```text
-plugins/minecraft_obj_cubizer.js
+minecraft_obj_cubizer/minecraft_obj_cubizer.js
 ```
 
 加载成功后，Blockbench 的文件菜单里会出现新的导入和导出功能。
+
+---
+
+## 【相关链接】
+
+另一个插件下载链接：
+
+```text
+https://treehey.github.io/Fimel/#/works/tools
+```
 
 ---
 
@@ -101,6 +112,22 @@ helicopter_obj/helicopter.obj
 | 贴图文件夹 | `block` | 对应资源包里的 `textures/block` |
 | 将模型居中到原点 | 按需开启 | 需要模型围绕原点制作动画时可以开启 |
 | 设置 Java cullface | 按需开启 | 需要自动设置面剔除时开启 |
+
+---
+
+## 【方块数量提示】
+
+插件本身没有写死最大导入数量，但 Blockbench 在处理大量 Cube 时会变慢。
+
+导入前插件会根据预计生成的 Cube 数量进行提示：
+
+| 预计生成 Cube 数量 | 提示 |
+| --- | --- |
+| `5000` 以下 | 通常比较稳 |
+| `5000` 以上 | 弹出性能提醒 |
+| `10000` 以上 | 弹出更强的性能警告，建议拆分 OBJ |
+
+如果是很大的 Minecraft 建筑，建议先拆成几个 OBJ 分批导入。
 
 ---
 
@@ -238,7 +265,7 @@ assets/fo/textures/block/
 
 1. 用 Mineways 或其他工具把 Minecraft 建筑导出为 OBJ。
 2. 确认 `.obj`、`.mtl`、`.png` 贴图都在导出目录中。
-3. 在 Blockbench 中加载 `minecraft_obj_cubizer.js`。
+3. 在 Blockbench 中加载 `minecraft_obj_cubizer/minecraft_obj_cubizer.js`。
 4. 使用“将 Minecraft OBJ 导入为方块”导入 OBJ。
 5. `OBJ 方块缩放` 保持 `1`。
 6. 填写正确的贴图命名空间和贴图文件夹。

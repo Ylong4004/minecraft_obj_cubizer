@@ -1,0 +1,20 @@
+{
+	"minecraft_obj_cubizer": {
+		"title": "Minecraft OBJ Cubizer",
+		"author": "Ylong",
+		"description": "Convert Minecraft building OBJ exports into textured Blockbench Java cube models.",
+		"version": "1.0.0",
+		"icon": "icon.svg",
+		"variant": "desktop",
+		"tags": [
+			"Minecraft: Java Edition",
+			"Import",
+			"Modeling"
+		],
+		"min_version": "4.8.0",
+		"has_changelog": true,
+		"repository": "https://github.com/Ylong4004/minecraft_obj_cubizer",
+		"bug_tracker": "https://github.com/Ylong4004/minecraft_obj_cubizer/issues",
+		"creation_date": "2026/05/16"
+	}
+}
