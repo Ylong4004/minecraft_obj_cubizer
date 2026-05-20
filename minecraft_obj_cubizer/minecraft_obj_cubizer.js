@@ -1771,6 +1771,10 @@
 					min: 1,
 					step: 100
 				},
+				cube_limit_note: {
+					type: 'info',
+					text: translate('form.cube_limit_note')
+				},
 				move_to_origin: {
 					label: translate('form.move_to_origin'),
 					type: 'checkbox',
@@ -4469,6 +4473,7 @@
 				model_blocks,
 				fallback_blocks,
 				fallback_details: fallbackDetailsFromMap(fallback_detail_map),
+				cube_limit: options.cube_limit,
 				model_source_ok,
 				texture_source_path: options.texture_source_path || ''
 			};
@@ -4509,6 +4514,7 @@
 				stats.model_blocks || 0,
 				stats.fallback_blocks || 0
 			]);
+			message += '\n\n' + translate('message.limit_note', [stats.cube_limit || DEFAULT_OPTIONS.cube_limit]);
 			if (!stats.model_source_ok) {
 				message += '\n\n' + translate('message.model_source_warning', [stats.texture_source_path || translate('message.model_source_auto')]);
 			}
@@ -4915,6 +4921,8 @@
 			[TRANSLATION_PREFIX + 'direct.form.texture_source_picker']: 'Choose texture source',
 			[TRANSLATION_PREFIX + 'direct.button.pick_texture_source_folder']: 'Folder',
 			[TRANSLATION_PREFIX + 'direct.button.pick_texture_source_jar']: 'Jar / Zip',
+			[TRANSLATION_PREFIX + 'direct.form.cube_limit_note']: 'This limit counts generated Blockbench cubes, not original Minecraft blocks. The default is 5000 cubes. For Java Block/Item Model export, keep the final model roughly within 48 x 48 x 48 blocks when possible.',
+			[TRANSLATION_PREFIX + 'direct.message.limit_note']: 'Cube limit for this import: %0 generated Blockbench cubes. This is not the original Minecraft block count. For Java Block/Item Model export, keep the final model roughly within 48 x 48 x 48 blocks when possible.',
 			[TRANSLATION_PREFIX + 'direct.message.model_source_auto']: 'automatic Minecraft jar detection',
 			[TRANSLATION_PREFIX + 'direct.message.model_source_warning']: 'Warning: Minecraft blockstate/model JSON could not be read from %0.\n\nChoose a Minecraft jar, a resource-pack root, an assets folder, or an assets/minecraft folder in the structure import dialog or Structure Import Settings. Without these model files, many special blocks will import as fallback full cubes.',
 			[TRANSLATION_PREFIX + 'direct.message.summary']: 'Imported %0 Blockbench cubes from %1 non-air blocks.\n\nFormat: %2.\nTextures: %3.\nSkipped hidden blocks: %4.\nTruncated by limit: %5.\nBlocks rendered from model JSON: %6.\nFallback full cubes: %7.\n\nBlock entity data such as chest contents and sign text is not read.',
@@ -4930,12 +4938,16 @@
 			[TRANSLATION_PREFIX + 'direct.message.fallback_reason.unknown']: 'Unknown fallback reason.'
 		});
 		Language.addTranslations('zh_tw', {
-			[TRANSLATION_PREFIX + 'direct.form.texture_source_picker']: '選擇貼圖來源'
+			[TRANSLATION_PREFIX + 'direct.form.texture_source_picker']: '選擇貼圖來源',
+			[TRANSLATION_PREFIX + 'direct.form.cube_limit_note']: '這裡限制的是導入後生成的 Blockbench cube 數，不是原始 Minecraft 方塊數。預設上限是 5000 個 cube。若要匯出為 Java Block/Item Model，建議最終模型盡量控制在約 48 x 48 x 48 格以內。',
+			[TRANSLATION_PREFIX + 'direct.message.limit_note']: '本次導入的 cube 上限設定為 %0。這裡統計的是生成的 Blockbench cube，不是原始 Minecraft 方塊數。若要匯出為 Java Block/Item Model，建議最終模型盡量控制在約 48 x 48 x 48 格以內。'
 		});
 		Language.addTranslations('zh', {
 			[TRANSLATION_PREFIX + 'direct.form.texture_source_picker']: '选择贴图来源',
 			[TRANSLATION_PREFIX + 'direct.button.pick_texture_source_folder']: '文件夹',
 			[TRANSLATION_PREFIX + 'direct.button.pick_texture_source_jar']: 'Jar / Zip',
+			[TRANSLATION_PREFIX + 'direct.form.cube_limit_note']: '这里限制的是导入后生成的 Blockbench cube 数，不是原始 Minecraft 方块数。默认上限是 5000 个 cube。若要导出为 Java Block/Item Model，建议最终模型尽量控制在约 48 x 48 x 48 格以内。',
+			[TRANSLATION_PREFIX + 'direct.message.limit_note']: '本次导入的 cube 上限设置为 %0。这里统计的是生成的 Blockbench cube，不是原始 Minecraft 方块数。若要导出为 Java Block/Item Model，建议最终模型尽量控制在约 48 x 48 x 48 格以内。',
 			[TRANSLATION_PREFIX + 'direct.message.model_source_auto']: '自动查找 Minecraft jar',
 			[TRANSLATION_PREFIX + 'direct.message.model_source_warning']: '警告：无法从 %0 读取 Minecraft 方块状态/模型 JSON。\n\n请在导入结构弹窗或“结构导入设置”里选择 Minecraft jar、资源包根目录、assets 文件夹，或 assets/minecraft 文件夹。没有这些模型文件时，很多特殊方块会退回成普通完整方块。',
 			[TRANSLATION_PREFIX + 'direct.message.summary']: '已从 %1 个非空气方块导入 %0 个 Blockbench 方块。\n\n格式：%2。\n贴图：%3。\n跳过的隐藏方块：%4。\n因数量限制截断：%5。\n使用模型 JSON 的方块：%6。\n退回完整方块：%7。\n\n不会读取箱子物品、告示牌文字等方块实体数据。',
@@ -4953,6 +4965,8 @@
 		Language.addTranslations('zh_tw', {
 			[TRANSLATION_PREFIX + 'direct.button.pick_texture_source_folder']: '資料夾',
 			[TRANSLATION_PREFIX + 'direct.button.pick_texture_source_jar']: 'Jar / Zip',
+			[TRANSLATION_PREFIX + 'direct.form.cube_limit_note']: '這裡限制的是導入後生成的 Blockbench cube 數，不是原始 Minecraft 方塊數。預設上限是 5000 個 cube。若要匯出為 Java Block/Item Model，建議最終模型盡量控制在約 48 x 48 x 48 格以內。',
+			[TRANSLATION_PREFIX + 'direct.message.limit_note']: '本次導入的 cube 上限設定為 %0。這裡統計的是生成的 Blockbench cube，不是原始 Minecraft 方塊數。若要匯出為 Java Block/Item Model，建議最終模型盡量控制在約 48 x 48 x 48 格以內。',
 			[TRANSLATION_PREFIX + 'direct.message.model_source_auto']: '自動尋找 Minecraft jar',
 			[TRANSLATION_PREFIX + 'direct.message.model_source_warning']: '警告：無法從 %0 讀取 Minecraft 方塊狀態/模型 JSON。\n\n請在匯入結構彈窗或「結構匯入設定」裡選擇 Minecraft jar、資源包根目錄、assets 資料夾，或 assets/minecraft 資料夾。沒有這些模型檔時，很多特殊方塊會退回成普通完整方塊。',
 			[TRANSLATION_PREFIX + 'direct.message.summary']: '已從 %1 個非空氣方塊匯入 %0 個 Blockbench 方塊。\n\n格式：%2。\n貼圖：%3。\n略過的隱藏方塊：%4。\n因數量限制截斷：%5。\n使用模型 JSON 的方塊：%6。\n退回完整方塊：%7。\n\n不會讀取箱子物品、告示牌文字等方塊實體資料。',
