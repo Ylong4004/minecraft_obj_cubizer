@@ -2,14 +2,16 @@
 	"minecraft_obj_cubizer": {
 		"title": "Minecraft OBJ Cubizer / Minecraft OBJ 方块转换器",
 		"author": "Ylong",
-		"description": "Convert Minecraft building OBJ exports into textured Blockbench Java cube models. / 将 Minecraft 建筑 OBJ 转换为带贴图的 Blockbench Java 方块模型。",
-		"version": "1.0.0",
+		"description": "将 Minecraft OBJ 和结构文件转换为可编辑的 Blockbench Java 方块模型。",
+		"version": "1.4.0",
 		"icon": "icon.svg",
 		"variant": "desktop",
 		"tags": [
 			"Minecraft: Java Edition",
 			"Import",
-			"Modeling"
+			"Modeling",
+			"Schematic",
+			"Litematic"
 		],
 		"min_version": "4.8.0",
 		"has_changelog": true,

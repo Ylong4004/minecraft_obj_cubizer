@@ -1,29 +1,90 @@
 {
+	"1.4.0": {
+		"title": "1.4.0 / 插件发布信息与本地安装整理",
+		"date": "2026-05-19",
+		"author": "Ylong",
+		"categories": [
+			{
+				"title": "整理",
+				"list": [
+					"合并邻近的小版本记录，重新整理 changelog 版本线。",
+					"删除 about.md 和 changelog.json 中的英文翻译，只保留中文说明。",
+					"将插件显示页图标改为 icon.svg，并确保图标同步到本地插件文件夹。",
+					"让 Blockbench 插件页从同目录 about.md 和 changelog.json 读取当前文案。",
+					"显式把本插件 Action 归属到 minecraft_obj_cubizer，避免 Features 页混入其他按钮。",
+					"修复本地插件安装记录，重启 Blockbench 后仍能保留插件。"
+				]
+			}
+		]
+	},
+	"1.3.0": {
+		"title": "1.3.0 / 特殊方块模型与 UV 细化",
+		"date": "2026-05-18",
+		"author": "Ylong",
+		"categories": [
+			{
+				"title": "模型",
+				"list": [
+					"为箱子、床、告示牌、陶罐、铜傀儡像等渲染器方块加入或细化内置可编辑模型。",
+					"修复箱子、陶罐、铜傀儡像、床等实体贴图的 UV 缩放与布局问题。",
+					"按 cr.json 中调整后的告示牌尺寸、告示牌 UV 和床 UV 标准更新内置模型。",
+					"根据 cube 面的真实像素尺寸计算缺省 UV，改善漏斗、炼药锅、脚手架、堆肥桶等小面贴图拉伸。",
+					"修复旋转方块模型的面方向与 UV 方向，包括活塞侧面、红石线连接形状等情况。",
+					"将同一个源方块生成的所有 cube 放入以该方块命名的组中。",
+					"按红石强度给红石线预览贴图着色，避免显示成白色。"
+				]
+			}
+		]
+	},
+	"1.2.0": {
+		"title": "1.2.0 / 结构导入与贴图来源增强",
+		"date": "2026-05-17",
+		"author": "Ylong",
+		"categories": [
+			{
+				"title": "结构导入",
+				"list": [
+					"完善直接导入 schematic、schem、litematic、结构 NBT 和单个 MCA 文件的流程。",
+					"在导入结构弹窗和结构导入设置中加入文件夹与 Jar/Zip 贴图来源选择。",
+					"支持资源包根目录、assets 文件夹、assets/minecraft 文件夹以及 Minecraft jar/zip 作为模型与贴图来源。",
+					"从 Minecraft Jar/Zip 读取的贴图标记为仅预览，保存模型时不会自动另存原版 PNG。",
+					"无法读取方块状态或模型 JSON 时显示警告，并在导入完成提示中列出退回完整方块的方块 ID、数量和原因。",
+					"导出 Java 模型时修正 direct 导入贴图的命名空间与路径。"
+				]
+			}
+		]
+	},
+	"1.1.0": {
+		"title": "1.1.0 / 合并直接导入与独立菜单",
+		"date": "2026-05-17",
+		"author": "Ylong",
+		"categories": [
+			{
+				"title": "功能",
+				"list": [
+					"将直接 Minecraft 结构导入器合并进主插件。",
+					"在 Blockbench 顶栏新增 Minecraft Cubizer 独立菜单。",
+					"将插件功能从文件导入/导出菜单移动到独立菜单。",
+					"新增资源包目录和 Minecraft jar 贴图来源选择。",
+					"加入英文、简体中文和繁体中文菜单文本。"
+				]
+			}
+		]
+	},
 	"1.0.0": {
 		"title": "1.0.0 / 首个稳定版本",
 		"date": "2026-05-16",
 		"author": "Ylong",
 		"categories": [
 			{
-				"title": "Features / 功能",
+				"title": "功能",
 				"list": [
-					"Initial stable release / 首个稳定版本",
-					"Import Minecraft-style OBJ building exports as Blockbench Java cubes / 将 Minecraft 风格建筑 OBJ 导入为 Blockbench Java 方块",
-					"Read MTL files and load linked PNG textures for preview / 读取 MTL 文件并加载关联 PNG 贴图用于预览",
-					"Add imported cubes to the current project when a project is open / 当前已有项目时，把导入方块加入当前项目",
-					"Create a Java Block project automatically when no project is open / 当前没有项目时，可自动创建 Java Block 项目",
-					"Save and reopen plugin import settings / 保存并复用插件导入设置",
-					"Apply texture namespace, texture folder, texture size, and cullface settings to imported content / 将贴图命名空间、贴图文件夹、贴图尺寸和 cullface 设置应用到已导入内容",
-					"Export imported OBJ textures into a resource pack folder / 将导入的 OBJ 贴图导出到资源包目录",
-					"Patch Java model texture paths with explicit namespaces during export / 导出 Java 模型时自动补全带命名空间的贴图路径"
-				]
-			},
-			{
-				"title": "Safety / 安全提示",
-				"list": [
-					"Warn when generated model coordinates exceed the common Java Block/Item coordinate range / 当生成坐标超出 Java Block/Item 常见范围时给出提示",
-					"Warn when an import is expected to create more than 5,000 cubes / 当预计生成超过 5,000 个方块时提示性能风险",
-					"Show a stronger warning for imports expected to create 10,000 or more cubes / 当预计生成 10,000 个或更多方块时给出更强提醒"
+					"将 Minecraft 风格建筑 OBJ 导入为 Blockbench Java 方块。",
+					"读取 MTL 文件并加载关联 PNG 贴图用于预览。",
+					"当前已有项目时，把导入方块加入当前项目。",
+					"当前没有项目时，可自动创建 Java Block 项目。",
+					"将导入的 OBJ 贴图导出到资源包目录。",
+					"导出 Java 模型时自动补全带命名空间的贴图路径。"
 				]
 			}
 		]

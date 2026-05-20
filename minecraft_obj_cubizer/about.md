@@ -1,38 +1,38 @@
 # Minecraft OBJ Cubizer / Minecraft OBJ 方块转换器
 
-Minecraft OBJ Cubizer converts Minecraft-style OBJ building exports into textured Java Block/Item cube models in Blockbench.
+Minecraft OBJ 方块转换器可以把 Minecraft 建筑导入为可编辑的 Blockbench Java 方块模型。
 
-Minecraft OBJ 方块转换器可以把 Minecraft 建筑导出的 OBJ 模型转换成 Blockbench 里的 Java Block/Item 方块模型，并保留 OBJ/MTL 中的贴图引用。
+## 功能
 
-## Features / 功能
+- 导入带 MTL/PNG 贴图的 Minecraft 建筑 OBJ。
+- 直接导入 `.schematic`、`.schem`、`.litematic`、结构 `.nbt` 和单个 `.mca` 区域文件。
+- 读取原版或资源包中的 blockstate/model JSON，支持半砖、楼梯、栅栏、石墙、按钮、火把等特殊方块。
+- 按 cube 面的真实像素尺寸计算原版模型缺省 UV。
+- 为箱子、床、告示牌、陶罐、铜傀儡像等渲染器方块提供内置可编辑模型。
+- 使用修正后的箱子、陶罐和铜傀儡像布局细化内置实体方块 UV。
+- 导出或修正带命名空间的贴图路径。
+- 结构导入完成后显示退回完整方块的方块 ID、数量和原因。
+- 保持插件浏览器的 About、Changelog 和 Features 页面只读取本插件自己的本地文件和操作。
+- 将导入的 OBJ 贴图复制到资源包目录。
+- 所有功能都位于 Blockbench 顶栏独立菜单中。
+- 保持本地插件安装记录可在重启 Blockbench 后继续加载。
 
-- Import OBJ files generated from Minecraft buildings. / 导入由 Minecraft 建筑生成的 OBJ 文件。
-- Read MTL material files and PNG texture paths. / 读取 MTL 材质文件和 PNG 贴图路径。
-- Rebuild axis-aligned OBJ quad faces into Blockbench cubes. / 将轴对齐的 OBJ 四边形面重组为 Blockbench 方块。
-- Add imported cubes to the current project when one is open. / 当前已有项目时，直接把导入方块加入当前项目。
-- Auto-create a Java Block project when no project is open. / 当前没有项目时，可以自动创建 Java Block 项目。
-- Export texture paths with explicit namespaces, such as `minecraft:block/iron_block` or `fo:block/iron_block`. / 导出带命名空间的贴图路径，例如 `minecraft:block/iron_block` 或 `fo:block/iron_block`。
-- Copy OBJ textures into a resource pack folder. / 将 OBJ 贴图复制到资源包目录。
-- Warn when an import may create too many cubes for comfortable Blockbench performance. / 当预计生成过多方块、可能影响 Blockbench 性能时给出提示。
+## 菜单
 
-## Recommended Workflow / 推荐流程
+加载插件后，Blockbench 顶栏会出现：
 
-1. Export your Minecraft building as OBJ. Mineways is a good tool for this. / 使用 Mineways 等工具把 Minecraft 建筑导出为 OBJ。
-2. Keep the `.obj`, `.mtl`, and texture files in the same exported folder structure. / 保持 `.obj`、`.mtl` 和贴图文件的原始导出目录结构。
-3. In Blockbench, use `File > Import > Import Minecraft OBJ as Cubes`. / 在 Blockbench 中使用“文件 > 导入 > 将 Minecraft OBJ 导入为方块”。
-4. Keep `OBJ block scale` at `1` for most Mineways exports. / 对大多数 Mineways 导出文件，`OBJ 方块缩放` 建议保持 `1`。
-5. Set the texture namespace and texture folder for your resource pack. / 按资源包需要填写贴图命名空间和贴图文件夹。
-6. Export the Java Block/Item JSON. / 导出 Java Block/Item 模型 JSON。
-7. Use `File > Export > Export OBJ Textures to Resource Pack` to copy textures. / 使用“文件 > 导出 > 导出 OBJ 贴图到资源包”复制贴图。
-8. Continue animation work in Animated Java if needed. / 如有需要，再交给 Animated Java 继续制作原版动画。
+```text
+Minecraft Cubizer / Minecraft 方块转换器
+```
 
-## Notes / 注意事项
+菜单中包含 OBJ 导入、直接结构导入、两套设置和贴图导出。
 
-This plugin is designed for Minecraft buildings made from axis-aligned blocks. It is not intended for ordinary triangulated mesh models, curved models, or heavily slanted geometry.
+贴图来源文件夹和 Minecraft Jar/Zip 文件可以直接在导入结构弹窗和“结构导入设置”中选择。
 
-本插件主要适合由轴对齐方块组成的 Minecraft 建筑，不适合普通三角网格模型、曲面模型或大量斜面结构。
+直接结构导入会把同一个源方块生成的所有 cube 放进同一个组，组名使用该方块名字。
 
-For large buildings, imports above 5,000 generated cubes may become slow. Imports above 10,000 generated cubes should usually be split into smaller OBJ parts.
+从 Minecraft Jar/Zip 读取的贴图会被视为仅预览资源，保存模型时不会自动另存原版 PNG 贴图。
 
-对于大型建筑，预计生成超过 5,000 个 Cube 时可能会变慢；超过 10,000 个 Cube 时通常建议先拆成多个 OBJ 分批导入。
+## 注意
 
+直接导入不会读取箱子物品、告示牌文字、旗帜图案或自定义头颅主人等方块实体数据。
