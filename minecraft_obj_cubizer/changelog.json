@@ -12,7 +12,8 @@
 					"将插件显示页图标改为 icon.svg，并确保图标同步到本地插件文件夹。",
 					"让 Blockbench 插件页从同目录 about.md 和 changelog.json 读取当前文案。",
 					"显式把本插件 Action 归属到 minecraft_obj_cubizer，避免 Features 页混入其他按钮。",
-					"修复本地插件安装记录，重启 Blockbench 后仍能保留插件。"
+					"修复本地插件安装记录，重启 Blockbench 后仍能保留插件。",
+					"在结构导入设置、导入完成提示和说明文档中补充 cube 上限与 Java 模型尺寸建议。"
 				]
 			}
 		]

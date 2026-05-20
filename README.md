@@ -59,5 +59,7 @@ https://treehey.github.io/Fimel/#/works/tools
 
 - OBJ 转换适合由 Minecraft 方块组成、轴对齐的建筑模型，不适合普通三角网格或曲面模型。
 - 直接结构导入会读取方块模型，但不会读取箱子物品、告示牌文字等方块实体数据。
+- 结构导入里的方块上限统计的是生成后的 Blockbench cube，不是原始 Minecraft 方块数；默认上限是 5,000 个 cube。
+- 若要导出为 Java Block/Item Model，建议最终模型尽量控制在约 48 x 48 x 48 格以内。
 - 大型建筑建议拆分导入。超过 5,000 个 cube 可能变慢，超过 10,000 个 cube 通常建议分批处理。
 - 修改插件后，需要在 Blockbench 里重新加载插件。
