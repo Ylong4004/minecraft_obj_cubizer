@@ -5,7 +5,7 @@
 > 适用 / For: Blockbench 桌面版、Minecraft Java 版资源包模型、Animated Java 流程
 
 Minecraft OBJ Cubizer 可以把 Minecraft 建筑 OBJ 转成 Blockbench Java 方块模型，也可以直接导入 Minecraft 结构文件。
-
+[制作思路](doc.md)
 
 ## 功能 / Features
 

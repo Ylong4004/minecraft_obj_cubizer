@@ -1,14 +1,19 @@
 # 把 Minecraft 建筑搬进 Blockbench：Minecraft OBJ Cubizer 插件
 
-作者：Ylong
+> 摘要：Minecraft OBJ Cubizer 是一个面向 Blockbench 桌面版的辅助插件。它主要用于把 Minecraft 里的建筑、结构文件或方块化的 OBJ 模型，转换成可以在 Blockbench 中编辑、导出，并可以交给 Animated Java 等工具使用的 Java 方块模型。本文旨在介绍插件的原理、支持的输入格式、贴图处理方式，以及一套基本使用流程。
 
-Minecraft OBJ Cubizer 是一个面向 Blockbench 桌面版的辅助插件。它主要用于把 Minecraft 里的建筑、结构文件或方块化的 OBJ 模型，转换成可以在 Blockbench 中编辑、导出，并可以交给 Animated Java 等工具使用的 Java 方块模型。本文旨在介绍插件的基本原理、支持的输入格式、贴图处理方式，以及一套基本使用流程。
+<p align="center">
+  <img src="doc_images/image.png">
+</p>
 
 ## 为什么要做这个插件
 
-在原版地图的创作中，我们经常会遇到这样一种需求：
+首先请看这样一个案例：我已经在游戏里搭建出了一架直升机，现在想让它的螺旋桨转起来，并且使直升机可以移动飞行。这个时候如果继续用方块展示实体去做，就会很麻烦。我知道 Blockbench 中的 Animated Java 插件可以辅助制作原版动画，但前提是我需要先在 Blockbench 中有这个模型。手动重新搭建很显然很不健康，那么有没有一种更方便的方式呢？
 
-我已经在 Minecraft 里搭好了一个建筑，或者拿到了一个 `.schem`、`.litematic`、结构 `.nbt` 文件，现在想把它放进 Blockbench 里继续加工，最后做成资源包模型、展示实体模型，或者交给 Animated Java 做动画。
+<p align="center">
+  <img src="doc_images/image1.png" width="50%">
+</p>
+在原版地图的创作中，我们时常会遇到与上述例子类似的需求：我已经在 Minecraft 里搭好了一个建筑，或者拿到了一个 `.schem`、`.litematic`、结构 `.nbt` 文件，现在想把它放进 Blockbench 里继续加工，最后做成资源包模型、展示实体模型，或者交给 Animated Java 做动画。
 
 这件事听上去应该很简单，毕竟 Minecraft 建筑大多由方块组成，Blockbench 的 Java Block/Item Model 里也有 cube。把一个方块变成一个 cube，似乎只是坐标转换。
 
@@ -21,13 +26,7 @@ Minecraft OBJ Cubizer 是一个面向 Blockbench 桌面版的辅助插件。它�
 - 箱子、床、告示牌等方块并不是普通方块模型，而是游戏渲染器单独处理的方块实体模型。
 - Java Block/Item Model 自身有尺寸和性能上的现实限制。
 
-所以我制作了这么一个插件，把 Minecraft 建筑尽可能转换成 Blockbench 能理解的 cube 结构，让我们这些创作者们可以继续编辑、拆分、调轴心、做动画或导出资源包 json。
-
-> [!TIP] 版本支持
-> Blockbench 最低版本：4.8.0
-> Minecraft Java 最低版本：1.8
-> 推荐 Minecraft Java 版本：1.13 及以上，最好选择与被导入建筑相同的游戏版本 jar
-> 导入结构时建议选择与建筑来源版本一致的 Minecraft jar。版本不一致时，部分新方块或特殊方块可能找不到对应 blockstate/model JSON，从而退回为完整方块。
+所以我制作了这么一个插件，把 Minecraft 建筑尽可能转换成 Blockbench 能理解的 cube 结构，让创作者们可以继续编辑、拆分、调轴心、做动画或导出资源包 json，而不是再从头手动搭一遍。
 
 ## 插件支持什么
 
@@ -53,6 +52,12 @@ Minecraft OBJ Cubizer 是一个面向 Blockbench 桌面版的辅助插件。它�
 
 - 如果你已经有 Mineways 导出的 OBJ，走 OBJ 导入更直接。
 - 如果你手里是结构文件，走直接结构导入可以保留更多方块状态信息。
+
+> [!TIP] 插件需求
+> Blockbench 最低版本：4.8.0
+> Minecraft Java 最低版本：1.8
+> 推荐 Minecraft Java 版本：1.13 及以上，最好选择与被导入建筑相同的游戏版本 jar
+> 导入结构时建议选择与建筑来源版本一致的 Minecraft jar。版本不一致时，部分新方块或特殊方块可能找不到对应 blockstate/model JSON，从而退回为完整方块。
 
 ## 思路：从方块到 cube
 
@@ -110,10 +115,10 @@ assets/minecraft/textures/block/oak_planks.png
 
 插件需要知道 `cube_all` 的六个面如何使用 `#all`，再把 `#all` 解析成 `minecraft:block/stone`。否则 Blockbench 里就会出现“父模型提供的纹理文件”无法正确显示的问题。
 
-
 > [!TIP] 特殊方块
 > 对于箱子、床、告示牌、陶罐等特殊方块。它们不是普通 block model，而是游戏中由独立渲染逻辑处理。插件目前采用内置可编辑模型的方式：识别到对应方块后，直接生成预设的 cube 结构，再套用对应实体贴图。
 > 这种做法不读取箱子物品、告示牌文字、旗帜图案、自定义头颅主人等方块实体数据。
+> 目前无法导入 minecraft:water 方块。
 
 ## 贴图处理
 
@@ -174,9 +179,10 @@ Minecraft Cubizer / Minecraft 方块转换器
 
 ## 使用流程一：从 OBJ 导入建筑
 
-如果你的建筑已经通过 Mineways 或类似工具导出为 OBJ，可以使用这一流程。
+如果你的建筑已经通过 [Mineways](http://mineways.com/) 或类似工具导出为 OBJ，可以使用这一流程。
 
-首先确认文件结构没有被破坏。OBJ、MTL 和贴图应保持原有相对路径，例如：
+我们回到开头的例子，借助工具从存档中将直升机建筑导出为 OBJ 模型。
+确认文件结构没有被破坏。OBJ、MTL 和贴图应保持原有相对路径：
 
 ```text
 helicopter_obj/
@@ -196,18 +202,26 @@ Minecraft 方块转换器 > 将 Minecraft OBJ 导入为方块
 
 常用设置建议如下：
 
-| 设置项 | 建议值 | 说明 |
-| --- | --- | --- |
-| OBJ 方块缩放 | `1` | Mineways 导出的建筑通常是 1 个 Minecraft 方块对应 1 个 OBJ 单位 |
-| 默认方块厚度 | `1` | 普通方块面重组成完整 cube 时使用 |
-| 贴图尺寸 | `16` | 原版方块贴图通常是 16x16 |
-| 贴图命名空间 | `minecraft` 或自定义 | 例如资源包命名空间为 `fo` 就填写 `fo` |
-| 贴图文件夹 | `block` | 对应资源包中的 `textures/block` |
-| 居中到原点 | 按需开启 | 做动画时可能更方便 |
+| 设置项       | 建议值                 | 说明                                                            |
+| ------------ | ---------------------- | --------------------------------------------------------------- |
+| OBJ 方块缩放 | `1`                  | Mineways 导出的建筑通常是 1 个 Minecraft 方块对应 1 个 OBJ 单位 |
+| 默认方块厚度 | `1`                  | 普通方块面重组成完整 cube 时使用                                |
+| 贴图尺寸     | `16`                 | 原版方块贴图通常是 16x16                                        |
+| 贴图命名空间 | `minecraft` 或自定义 | 例如资源包命名空间为 `fo` 就填写 `fo`                       |
+| 贴图文件夹   | `block`              | 对应资源包中的 `textures/block`                               |
+| 居中到原点   | 按需开启               | 做动画时可能更方便                                              |
 
 这里最容易填错的是“OBJ 方块缩放”。不要看到 Minecraft 贴图是 16x16 就把缩放填成 16。缩放填 16 会把坐标一起放大，可能导致导出的 json 坐标超出 Java Block/Item Model 常见范围。
 
-导入后，可以使用 Blockbench 自带的 Java Block/Item Model 导出 json。
+<p align="center">
+  <img src="doc_images/image2.png" width="50%">
+</p>
+
+导入成功检查无误后，可以使用 Blockbench 自带的 Java Block/Item Model 导出 json 文件至资源包的 models/item 目录中。定义相应的物品模型映射文件后，就可以在游戏中使用该模型了。
+
+<p align="center">
+  <img src="doc_images/image4.png" width="75%">
+</p>
 
 如果 OBJ 使用了自带贴图（非原版），还可以使用：
 
@@ -215,29 +229,38 @@ Minecraft 方块转换器 > 将 Minecraft OBJ 导入为方块
 Minecraft 方块转换器 > 导出 OBJ 贴图到资源包
 ```
 
-把导入的 PNG 贴图复制到资源包目录中。
+把导入的 PNG 贴图复制到资源包的 textures/block 目录中。
+
+当然，也可以转换项目至 Animated Java 格式，制作直升机的螺旋桨旋转动画。
+制作完成后再通过 Animated Java 插件自带的功能导入至数据包和资源包。
 
 ## 使用流程二：直接导入结构文件
 
 如果你手里是 `.schem`、`.litematic`、结构 `.nbt` 或 `.mca`，可以直接使用结构导入。
 
-打开：
+> [!TIP] 提示
+> 需要注意的是，`.schem`、`.litematic`、结构 `.nbt` 和 `.mca` 的存储上限并不相同。
+> 原版结构 `.nbt` 在游戏中通常受结构方块一次最多 `48 x 48 x 48` 的保存范围限制；
+> `.mca` 则是按区域文件存储世界数据，一个 `.mca` 对应 `32 x 32` 个区块。
+> 相比之下，`.schem` 和 `.litematic` 一般没有这么小的固定方块上限，实际更常受到编辑器实现、内存占用和文件体积的限制。
+
+以一座在游戏中用结构方块保存的城堡为例，打开：
 
 ```text
 Minecraft 方块转换器 > 导入 Minecraft 结构
 ```
 
-在弹窗里重点设置“贴图来源文件夹或 Minecraft jar”。建议直接选择对应版本的 Minecraft jar，或者选择一个已经解包的资源包目录。
+选择位于 `存档根目录\generated\minecraft\structures\` 下的 nbt 结构文件，在弹窗里重点设置“贴图来源文件夹或 Minecraft jar”。建议直接选择对应版本的 Minecraft jar文件，或者选择一个已经解包的资源包目录。
 
 然后确认以下设置：
 
-| 设置项 | 说明 |
-| --- | --- |
+| 设置项                  | 说明                                                                 |
+| ----------------------- | -------------------------------------------------------------------- |
 | 读取 Minecraft 方块模型 | 开启后会读取 blockstate/model json，用于生成楼梯、栅栏、墙等特殊方块 |
-| 最多创建方块数 | 限制生成的 Blockbench cube 数量，默认 5000 |
-| 移动到原点 | 将导入结构整体移动到原点附近 |
-| 居中到原点 | 更适合需要围绕中心制作动画的模型 |
-| 设置 Java cullface | 为面写入 cullface 信息，按需求开启 |
+| 最多创建方块数          | 限制生成的 Blockbench cube 数量，默认 5000                           |
+| 移动到原点              | 将导入结构整体移动到原点附近                                         |
+| 居中到原点              | 更适合需要围绕中心制作动画的模型                                     |
+| 设置 Java cullface      | 为面写入 cullface 信息，按需求开启                                   |
 
 导入完成后，插件会显示统计信息，包括：
 
@@ -249,6 +272,16 @@ Minecraft 方块转换器 > 导入 Minecraft 结构
 - 退回完整方块的方块 ID 和原因
 
 如果某些方块退回完整方块，通常是因为插件没有找到对应的 blockstate/model json，或者该模型无法产生可显示的面。此时优先检查贴图来源是否选对版本、路径是否包含 `assets/minecraft/blockstates` 和 `assets/minecraft/models`。
+
+<p align="center">
+  <img src="doc_images/image5.png" width="50%">
+</p>
+
+随后将该模型导入至资源包中。
+
+<p align="center">
+  <img src="doc_images/image6.png" width="75%">
+</p>
 
 ## 关于数量和尺寸限制
 
@@ -264,7 +297,20 @@ Minecraft 方块转换器 > 导入 Minecraft 结构
 48 x 48 x 48 格
 ```
 
-这不是说超过就一定不能看，而是越大越容易遇到导出、显示、性能或游戏内使用问题。大型建筑更适合拆成多个部件，再根据项目需要分别处理。
+越大越容易遇到导出、显示、性能或游戏内使用问题。大型建筑更适合拆成多个部件，再根据项目需要分别处理。
+
+> [!TIP] 提示
+> 如果不执着使用物品模型的话，将项目转换为 Animated Java 格式，再导入游戏中可以获得不错的性能提升，且不限制于 Java Block/Item Model 的大小限制。
+
+## 更新方向
+
+目前这个插件在导入大型建筑时，最明显的问题就是：一旦生成的 Blockbench cube 太多，编辑、选择、保存甚至视图操作都会出现比较严重的卡顿。所以后续更新的重点，不会只是单纯继续提高上限，而是尽量减少无意义的 cube，并且让导入过程本身更轻一些。
+
+后续有以下三个更新方向。
+
+- 在导入前减少要处理的内容，按选区、按高度范围、按方块种类筛选导入。
+- 尽量降低最终生成的 cube 数量，对连续的完整方块做合并。
+- 继续优化导入和整理流程本身。
 
 ## 常见问题
 
@@ -286,7 +332,7 @@ OBJ 导入时最常见原因是缩放设置过大。Minecraft 建筑 OBJ 通常�
 
 当贴图来源是 Minecraft jar 或 zip 时，插件会把这些贴图视作预览资源，不会在保存模型时强制另存原版 PNG。需要复制 OBJ 自带贴图时，再使用插件菜单中的“导出 OBJ 贴图到资源包”。
 
-### 能不能读取箱子物品、告示牌文字或旗帜图案
+### 能不能读取头颅纹理、告示牌文字或旗帜图案
 
 目前不读取。插件主要转换模型外形和贴图，不处理方块实体内部数据。箱子、告示牌、床等会尽量生成可编辑模型，但其中的物品、文字、图案和玩家头主人等数据不属于当前目标。
 
@@ -306,3 +352,9 @@ OBJ 导入时最常见原因是缩放设置过大。Minecraft 建筑 OBJ 通常�
 Minecraft OBJ Cubizer 的核心思路并不复杂，把 Minecraft 的方块、方块状态和模型 json，尽量翻译成 Blockbench 能编辑的 cube。麻烦的是贴图链、父模型、UV、旋转、特殊方块和体量控制。
 
 对于原版创作者来说，它的价值在于减少重复劳动。当你想给一些建筑做动画时，你不需要手动把一个建筑里的每个方块都制作出一个方块展示实体或者在Blockbench重新搭成 一系列cube，也不需要从零复刻每个楼梯、栅栏和墙的形状。插件先完成大部分机械转换，创作者再把精力放到别的的地方。
+
+## 插件链接
+
+- [推荐下载链接](https://treehey.github.io/Fimel/#/works/tools)
+- [备用蓝奏云下载链接](https://ylong4004.lanzn.com/iVFNA3obc03e)
+- [Github仓库](https://github.com/Ylong4004/minecraft_obj_cubizer)
