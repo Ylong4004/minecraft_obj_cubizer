@@ -1,6 +1,6 @@
 (() => {
 	const PLUGIN_ID = 'minecraft_obj_cubizer';
-	const PLUGIN_VERSION = '1.4.0';
+	const PLUGIN_VERSION = '1.6.1';
 	const FACE_DIRECTIONS = ['north', 'east', 'south', 'west', 'up', 'down'];
 	const EPSILON = 0.00001;
 	const JAVA_COORDINATE_MIN = -16;
@@ -9,9 +9,14 @@
 	const CUBE_DANGER_COUNT = 10000;
 	const TRANSLATION_PREFIX = `plugin.${PLUGIN_ID}.`;
 	const PROJECT_OPTIONS_PROPERTY = `${PLUGIN_ID}_options`;
+	const PERFORMANCE_PROPERTY = `${PLUGIN_ID}_performance`;
+	const BATCH_LAYER = 29;
 	const IMPORTED_PROPERTY = `${PLUGIN_ID}_imported`;
 	const SOURCE_PATH_PROPERTY = `${PLUGIN_ID}_source_path`;
 	const TEXTURE_FULL_PATH_PROPERTY = `${PLUGIN_ID}_texture_full_path`;
+	const TEXTURE_CACHE_KEY_PROPERTY = `${PLUGIN_ID}_texture_cache_key`;
+	const TEXTURE_ANIMATION_PROPERTY = `${PLUGIN_ID}_animation_metadata`;
+	const TEXTURE_FRAME_LAYOUT_PROPERTY = `${PLUGIN_ID}_frame_layout`;
 	const STORAGE_KEY = `${PLUGIN_ID}_options`;
 	const MENU_ID = `${PLUGIN_ID}_menu`;
 	const PLUGIN_ACTION_IDS = [
@@ -19,7 +24,8 @@
 		'open_minecraft_obj_cubizer_settings',
 		'export_minecraft_obj_textures',
 		'import_minecraft_structure_cubes',
-		'open_minecraft_structure_import_settings'
+		'open_minecraft_structure_import_settings',
+		'preview_minecraft_structure', 'create_minecraft_animation_part', 'minecraft_cubizer_performance'
 	];
 	const DEFAULT_OPTIONS = {
 		scale: 1,
@@ -41,14 +47,265 @@
 	let export_textures_action;
 	let direct_import_action;
 	let direct_settings_action;
+	let preview_action;
+	let animation_part_action;
+	let performance_action;
+	let performance_property;
+	let performance_listeners = [];
+	let viewport_batch;
+	let viewport_timer;
+	let viewport_epoch = 0;
+	let uv_guard;
+	let viewport_enabled = false;
 	let plugin_menu;
 	let compile_listener;
 	let project_options_property;
 	let texture_imported_property;
 	let texture_source_path_property;
 	let texture_full_path_property;
+	let texture_cache_key_property;
+	let texture_animation_property;
+	let texture_frame_layout_property;
+	let project_texture_listener;
+	let parsed_texture_listener;
 	let cube_imported_property;
 	let cubizer_options = Object.assign({}, DEFAULT_OPTIONS);
+	let active_import = null;
+	let installation_timer;
+	let persistence_cache;
+	let page_text_loaded = false;
+
+	function isAnimatedJavaFormat(format = Format) {
+		return !!format && /animated[_-]java/i.test(format.id);
+	}
+
+	function initializeImportProject(name, enabled, format_id = 'java_block', uv_size = 16) {
+		if (!Project) {
+			if (!enabled) throw new Error(translate('message.no_project_to_import'));
+			let format = Formats[format_id];
+			if (!format) throw new Error(translate('message.format_unavailable', [format_id]));
+			setupProject(format);
+			Project.name = pathStem(name);
+			Project.texture_width = uv_size;
+			Project.texture_height = uv_size;
+			Project.box_uv = false;
+		}
+		if (Format.single_texture || (Format.box_uv && !Format.optional_box_uv) || Format.image_editor || Format.edit_mode === false) {
+			throw new Error(translate('message.unsupported_format', [Format.name || Format.id]));
+		}
+		return Project;
+	}
+
+	function uvForProject(uv, source_width = 16, source_height = 16, texture) {
+		let width = Format.per_texture_uv_size ? (texture?.uv_width || source_width) : Project.texture_width;
+		let height = Format.per_texture_uv_size ? (texture?.uv_height || source_height) : Project.texture_height;
+		return uv.map((value, index) => value * (index % 2 ? height / source_height : width / source_width));
+	}
+
+	function uniqueImportGroup(name, parent, origin = [0, 0, 0]) {
+		let group = new Group({name, origin});
+		if (Format.bone_rig) {
+			group.sanitizeName();
+			group.createUniqueName();
+		}
+		if (parent) group.addTo(parent);
+		group.init();
+		group.isOpen = false;
+		return group;
+	}
+
+	function beginImportTask() {
+		if (active_import || Project?.locked || (typeof Undo !== 'undefined' && Undo.current_save)) throw new Error(translate('message.import_busy'));
+		restoreViewportBatch();
+		let task = {cancelled: false, project: Project, saved: Project?.saved, undo: null, finished: false, mesh_layers: new Map()};
+		task.dialog = new Dialog({
+			id: `${PLUGIN_ID}_progress`, title: translate('message.importing'), width: 440,
+			buttons: ['dialog.cancel'], cancelIndex: 0, confirmIndex: -1,
+			cancel_on_click_outside: false,
+			component: {data() { return {status: ''}; }, template: '<p>{{ status }}</p>'},
+			progress_bar: {progress: 0},
+			onConfirm() { return false; },
+			onCancel() { task.cancelled = true; task.worker_session?.dispose(); return false; }
+		}).show();
+		if (task.project) task.project.locked = true;
+		active_import = task;
+		return task;
+	}
+
+	async function yieldImport(task, current, total) {
+		if (task.cancelled || Project !== task.project) throw Object.assign(new Error(translate('message.import_cancelled')), {import_cancelled: true});
+		let now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+		if (task.last_yield !== undefined && now - task.last_yield < 16) return;
+		task.dialog.progress_bar?.setProgress(total ? current / total : 0);
+		if (task.dialog.content_vue) task.dialog.content_vue.status = `${current} / ${total}`;
+		await new Promise(resolve => setTimeout(resolve, 0));
+		task.last_yield = typeof performance !== 'undefined' ? performance.now() : Date.now();
+		if (task.cancelled || Project !== task.project) {
+			let error = new Error(translate('message.import_cancelled'));
+			error.import_cancelled = true;
+			throw error;
+		}
+	}
+
+	function endImportTask(task, failed) {
+		if (!task || task.finished) return;
+		if (task.project) task.project.locked = false;
+		try {
+			if (failed && task.undo?.current_save) {
+				let current_project = Project;
+				if (task.project && Project !== task.project) task.project.select();
+				task.undo.cancelEdit(true);
+				if (task.project) task.project.saved = task.saved;
+				if (current_project && current_project !== task.project) current_project.select();
+			}
+		} finally {
+			task.finished = true;
+			task.dialog.hide();
+			if (active_import === task) active_import = null;
+			task.worker_session?.dispose();
+			for (let [mesh, mask] of task.mesh_layers) restoreLayerMask(mesh, mask);
+			scheduleViewportBatch();
+		}
+	}
+
+	function updateImportedView(cubes, groups) {
+		// init already sets up geometry and UV; repeating it doubles native work and plugin notifications.
+		if (Canvas.updateView) Canvas.updateView({elements: cubes, element_aspects: {}, groups, selection: true});
+		else { Canvas.updateAll(); updateSelection(); }
+		if (typeof Validator !== 'undefined') Validator.validate();
+	}
+
+	function initImportedCube(cube, parent) {
+		cube.addTo(parent).init();
+		if (active_import && cube.mesh?.layers) {
+			active_import.mesh_layers.set(cube.mesh, cube.mesh.layers.mask);
+			cube.mesh.layers.set(BATCH_LAYER);
+		}
+		return cube;
+	}
+
+	function primeTextureImage(texture, width, height) {
+		texture.width = width; texture.height = height;
+		let map = texture.getOwnMaterial?.()?.map;
+		if (map) { map.width = width; map.height = height; }
+		let callback = texture.load_callback;
+		texture.load_callback = function(value) {
+			callback?.call(this, value);
+			if (typeof TextureAnimator !== 'undefined' && texture.frameCount > 1) TextureAnimator.updateButton();
+			if (typeof UVEditor !== 'undefined' && UVEditor.vue?.texture === texture) UVEditor.vue.updateTexture?.();
+			scheduleViewportBatch();
+		};
+	}
+
+	function releaseUVGuard() {
+		if (uv_guard) {
+			if (uv_guard.vue.display_uv === 'selected_elements') uv_guard.vue.display_uv = uv_guard.value;
+			if (uv_guard.vue.getDisplayedUVElements === uv_guard.wrapper) uv_guard.vue.getDisplayedUVElements = uv_guard.original;
+		}
+		uv_guard = null;
+	}
+
+	function limitImportUV(count) {
+		if (count >= 512 && Project?.[PERFORMANCE_PROPERTY] !== false && typeof UVEditor !== 'undefined' && UVEditor.vue) {
+			let vue = UVEditor.vue;
+			if (!uv_guard) {
+				let original = vue.getDisplayedUVElements;
+				let wrapper = function() { return (this.mappable_elements || []).slice(0, 64); };
+				uv_guard = {project: Project, vue, value: vue.display_uv, original, wrapper};
+				if (original) vue.getDisplayedUVElements = wrapper;
+			}
+			vue.display_uv = 'selected_elements';
+		}
+	}
+
+	function restoreViewportBatch() {
+		viewport_epoch++; clearTimeout(viewport_timer);
+		if (!viewport_batch) return;
+		for (let [object, mask] of viewport_batch.layers) restoreLayerMask(object, mask);
+		for (let [raycaster, mask] of viewport_batch.raycasters) raycaster.layers.mask = (raycaster.layers.mask & ~(1 << BATCH_LAYER)) | (mask & (1 << BATCH_LAYER));
+		for (let mesh of viewport_batch.meshes) { mesh.parent?.remove(mesh); mesh.geometry.dispose(); }
+		viewport_batch = null;
+	}
+
+	function restoreLayerMask(object, mask) {
+		object.layers.mask = object.layers.mask === (1 << BATCH_LAYER) ? mask : (object.layers.mask & ~(1 << BATCH_LAYER)) | (mask & (1 << BATCH_LAYER));
+	}
+
+	function viewportBatchStatus() {
+		return {meshes: viewport_batch?.meshes.length || 0, objects: viewport_batch?.layers.size || 0, enabled: viewport_enabled};
+	}
+
+	function scheduleViewportBatch() {
+		clearTimeout(viewport_timer);
+		if (!viewport_enabled || typeof THREE === 'undefined' || typeof Project === 'undefined' || !Project) return;
+		viewport_timer = setTimeout(() => buildViewportBatch().catch(error => { restoreViewportBatch(); console.warn('Cubizer viewport batching', error); }), 80);
+	}
+
+	async function buildViewportBatch() {
+		restoreViewportBatch();
+		let project = Project, token = viewport_epoch;
+		let cubes = Cube.all.filter(isCubizerCube);
+		if (project[PERFORMANCE_PROPERTY] === false || cubes.length < 512) { releaseUVGuard(); return; }
+		limitImportUV(cubes.length);
+		if (active_import || project.locked || (project.view_mode && project.view_mode !== 'textured') || (typeof Modes !== 'undefined' && !Modes.edit) || globalThis.__mcmo_api?.isEnabled()) return;
+		let buckets = new Map(), compatible = [], alpha_cache = new Map();
+		for (let i = 0; i < cubes.length; i++) {
+			if (i % 256 === 0) {
+				await new Promise(resolve => setTimeout(resolve, 0));
+				if (token !== viewport_epoch || Project !== project || active_import) return;
+			}
+			let cube = cubes[i], mesh = cube.mesh, geometry = mesh?.geometry;
+			if (cube.selected || !cube.visibility || !mesh?.visible || !mesh.parent || !geometry?.index || !geometry.attributes.normal) continue;
+			let textures = Object.values(cube.faces).filter(face => face.texture !== null).map(face => face.getTexture());
+			if (textures.some(texture => {
+				if (!texture || texture.error || texture.force_translucent || texture.frameCount > 1 || !texture.ctx || texture.render_mode !== 'default') return true;
+				if (!alpha_cache.has(texture)) {
+					let pixels = texture.ctx.getImageData(0, 0, texture.width, texture.height).data, cutout = true;
+					for (let j = 3; j < pixels.length; j += 4) if (pixels[j] !== 0 && pixels[j] !== 255) { cutout = false; break; }
+					alpha_cache.set(texture, cutout);
+				}
+				return !alpha_cache.get(texture);
+			})) continue;
+			mesh.updateMatrix();
+			let normal_matrix = new THREE.Matrix3().getNormalMatrix(mesh.matrix), position = new THREE.Vector3(), normal = new THREE.Vector3();
+			let ranges = Array.isArray(mesh.material) ? geometry.groups : [{start: 0, count: geometry.index.count, materialIndex: 0}];
+			for (let range of ranges) {
+				let material = Array.isArray(mesh.material) ? mesh.material[range.materialIndex] : mesh.material;
+				if (!material || !range.count) continue;
+				let key = `${mesh.parent.uuid}:${material.uuid}:${mesh.renderOrder}`;
+				let bucket = buckets.get(key);
+				if (!bucket) buckets.set(key, bucket = {parent: mesh.parent, material, renderOrder: mesh.renderOrder, positions: [], normals: [], uvs: []});
+				for (let j = range.start; j < range.start + range.count; j++) {
+					let index = geometry.index.getX(j), attributes = geometry.attributes;
+					position.fromBufferAttribute(attributes.position, index).applyMatrix4(mesh.matrix);
+					normal.fromBufferAttribute(attributes.normal, index).applyMatrix3(normal_matrix).normalize();
+					bucket.positions.push(position.x, position.y, position.z); bucket.normals.push(normal.x, normal.y, normal.z);
+					bucket.uvs.push(attributes.uv.getX(index), attributes.uv.getY(index));
+				}
+			}
+			compatible.push(mesh);
+		}
+		if (token !== viewport_epoch || Project !== project || active_import || globalThis.__mcmo_api?.isEnabled() || !compatible.length) return;
+		let batch = viewport_batch = {project, meshes: [], layers: new Map(), raycasters: new Map()};
+		for (let bucket of buckets.values()) {
+			let geometry = new THREE.BufferGeometry();
+			geometry.setAttribute('position', new THREE.Float32BufferAttribute(bucket.positions, 3));
+			geometry.setAttribute('normal', new THREE.Float32BufferAttribute(bucket.normals, 3));
+			geometry.setAttribute('uv', new THREE.Float32BufferAttribute(bucket.uvs, 2));
+			geometry.setAttribute('highlight', new THREE.BufferAttribute(new Uint8Array(bucket.positions.length / 3), 1));
+			geometry.computeBoundingSphere();
+			let mesh = new THREE.Mesh(geometry, bucket.material); mesh.no_export = true; mesh.renderOrder = bucket.renderOrder;
+			mesh.name = 'cubizer_viewport_batch'; bucket.parent.add(mesh); batch.meshes.push(mesh);
+		}
+		for (let mesh of compatible) {
+			batch.layers.set(mesh, mesh.layers.mask); mesh.layers.set(BATCH_LAYER);
+			if (mesh.grid_box) { batch.layers.set(mesh.grid_box, mesh.grid_box.layers.mask); mesh.grid_box.layers.set(BATCH_LAYER); }
+		}
+		// Native picking still intersects the original, unmodified cube geometry.
+		for (let preview of Preview.all || []) if (preview.raycaster?.layers) {
+			batch.raycasters.set(preview.raycaster, preview.raycaster.layers.mask); preview.raycaster.layers.enable(BATCH_LAYER);
+		}
+	}
 
 	function addTranslations() {
 		if (typeof Language === 'undefined' || !Language.addTranslations) return;
@@ -175,6 +432,7 @@
 		if (typeof ModelProject !== 'undefined' && !ModelProject.properties?.[PROJECT_OPTIONS_PROPERTY]) {
 			project_options_property = new Property(ModelProject, 'object', PROJECT_OPTIONS_PROPERTY, {exposed: false});
 		}
+		if (typeof ModelProject !== 'undefined' && !ModelProject.properties?.[PERFORMANCE_PROPERTY]) performance_property = new Property(ModelProject, 'boolean', PERFORMANCE_PROPERTY, {default: true, exposed: false});
 		if (typeof Texture !== 'undefined') {
 			if (!Texture.properties?.[IMPORTED_PROPERTY]) {
 				texture_imported_property = new Property(Texture, 'boolean', IMPORTED_PROPERTY, {exposed: false});
@@ -185,6 +443,11 @@
 			if (!Texture.properties?.[TEXTURE_FULL_PATH_PROPERTY]) {
 				texture_full_path_property = new Property(Texture, 'string', TEXTURE_FULL_PATH_PROPERTY, {exposed: false});
 			}
+			if (!Texture.properties?.[TEXTURE_CACHE_KEY_PROPERTY]) {
+				texture_cache_key_property = new Property(Texture, 'string', TEXTURE_CACHE_KEY_PROPERTY, {exposed: false});
+			}
+			if (!Texture.properties?.[TEXTURE_ANIMATION_PROPERTY]) texture_animation_property = new Property(Texture, 'object', TEXTURE_ANIMATION_PROPERTY, {exposed: false});
+			if (!Texture.properties?.[TEXTURE_FRAME_LAYOUT_PROPERTY]) texture_frame_layout_property = new Property(Texture, 'object', TEXTURE_FRAME_LAYOUT_PROPERTY, {exposed: false});
 		}
 		if (typeof Cube !== 'undefined' && !Cube.properties?.[IMPORTED_PROPERTY]) {
 			cube_imported_property = new Property(Cube, 'boolean', IMPORTED_PROPERTY, {exposed: false});
@@ -192,10 +455,14 @@
 	}
 
 	function unregisterProperties() {
+		performance_property?.delete();
 		if (project_options_property) project_options_property.delete();
 		if (texture_imported_property) texture_imported_property.delete();
 		if (texture_source_path_property) texture_source_path_property.delete();
 		if (texture_full_path_property) texture_full_path_property.delete();
+		if (texture_cache_key_property) texture_cache_key_property.delete();
+		texture_animation_property?.delete();
+		texture_frame_layout_property?.delete();
 		if (cube_imported_property) cube_imported_property.delete();
 	}
 
@@ -687,6 +954,7 @@
 			let texture_path = getTexturePath(material_name, materials, base_dir, path_module);
 			let texture_name = texture_path ? pathBasename(texture_path) : cleanName(material_name) + '.png';
 			let texture = new Texture({id: texture_id, name: texture_name});
+			texture[TEXTURE_FRAME_LAYOUT_PROPERTY] = {width: options.texture_size, height: options.texture_size, frames: 1}; attachTextureFrameLayout(texture);
 			texture[SOURCE_PATH_PROPERTY] = texture_path;
 			texture[IMPORTED_PROPERTY] = true;
 
@@ -707,7 +975,7 @@
 			new_textures.push(texture);
 		});
 
-		if (new_textures[0]) new_textures[0].enableParticle();
+		if (new_textures[0] && !Texture.all.some(texture => texture.particle)) new_textures[0].enableParticle();
 		return textures;
 	}
 
@@ -866,7 +1134,7 @@
 			if (faces[face.direction].texture !== null) return;
 
 			faces[face.direction] = {
-				uv: face.uv.slice(),
+				uv: uvForProject(face.uv, options.texture_size, options.texture_size, face.texture),
 				texture: face.texture ? face.texture.uuid : false
 			};
 			if (options.cull_faces) faces[face.direction].cullface = face.direction;
@@ -875,25 +1143,28 @@
 		return faces;
 	}
 
-	function createCubes(groups, options, root_group, new_cubes) {
+	async function createCubes(groups, options, root_group, new_cubes, task) {
 		let offset = getImportOffset(groups, options);
 
-		groups.forEach((group, index) => {
+		for (let index = 0; index < groups.length; index++) {
+			if (index % 32 === 0) await yieldImport(task, index, groups.length);
+			let group = groups[index];
 			let from = scalePoint(group.box.min, options.scale, offset);
 			let to = scalePoint(group.box.max, options.scale, offset);
 
-			let cube = new Cube({
+			let cube = initImportedCube(new Cube({
 				name: `obj_cube_${index + 1}`,
+				box_uv: false,
 				autouv: 0,
 				from,
 				to,
 				origin: [0, 0, 0],
 				faces: cubeFacesFromGroup(group, options)
-			}).addTo(root_group).init();
+			}), root_group);
 
 			cube[IMPORTED_PROPERTY] = true;
 			new_cubes.push(cube);
-		});
+		}
 	}
 
 	function sanitizeOptions(options) {
@@ -1102,7 +1373,11 @@
 	}
 
 	async function importOBJAsCubes(file, options) {
+		let task;
+		let failed = true;
 		try {
+			if (active_import) throw new Error(translate('message.import_busy'));
+			let source_project = Project;
 			let path_module = isApp ? getNativeModule('path') : null;
 			let base_dir = file.path ? (path_module ? path_module.dirname(file.path) : getDirname(file.path)) : '';
 			let fs = isApp && file.path ? getNativeModule('fs', {
@@ -1144,48 +1419,35 @@
 				return;
 			}
 			if (!await confirmCubeCount(cuboids)) return;
-			if (!await confirmJavaCoordinateRange(cuboids, options)) return;
-
-			if (!Project) {
-				if (!options.auto_create_project) {
-					Blockbench.showMessageBox({
-						title: translate('title'),
-						icon: 'info',
-						message: translate('message.no_project_to_import')
-					});
-					return;
-				}
-				setupProject(Formats.java_block);
-				Project.name = pathStem(file.name || file.path);
-			}
+			if ((!Project || Format.id === 'java_block') && !await confirmJavaCoordinateRange(cuboids, options)) return;
+			if (Project !== source_project) throw new Error(translate('message.import_cancelled'));
 
 			options = saveActiveOptions(options);
 
-			Project.texture_width = options.texture_size;
-			Project.texture_height = options.texture_size;
-			Project.box_uv = false;
+			initializeImportProject(file.name || file.path, options.auto_create_project, 'java_block', options.texture_size);
+			task = beginImportTask();
 
 			let new_cubes = [];
 			let new_textures = [];
 			let new_groups = [];
 			Undo.initEdit({elements: new_cubes, textures: new_textures, groups: new_groups, outliner: true});
+			task.undo = Undo;
 
 			let textures = createTextures(obj, materials, options, file.path, fs, path_module, new_textures);
 			cubizer_faces.forEach(face => {
 				face.texture = textures[face.material] || textures.default || null;
 			});
 
-			let root_group = new Group(pathStem(file.name || file.path)).init();
+			let root_group = uniqueImportGroup(pathStem(file.name || file.path));
 			root_group.isOpen = true;
 			new_groups.push(root_group);
 
-			createCubes(cuboids, options, root_group, new_cubes);
+			await createCubes(cuboids, options, root_group, new_cubes, task);
 
 			Undo.finishEdit(translate('undo.import'));
-			root_group.select();
-			Canvas.updateAll();
-			updateSelection();
-			Validator.validate();
+			failed = false;
+			endImportTask(task, false);
+			updateImportedView(new_cubes, new_groups);
 
 			showImportSummary({
 				cubes: new_cubes.length,
@@ -1194,6 +1456,11 @@
 				skipped: skipped_faces
 			});
 		} catch (error) {
+			endImportTask(task, failed);
+			if (error.import_cancelled) {
+				Blockbench.showQuickMessage(error.message, 2500);
+				return;
+			}
 			console.error(error);
 			Blockbench.showMessageBox({
 				title: translate('title'),
@@ -1201,6 +1468,8 @@
 				width: 520,
 				message: translate('message.import_failed', [error?.message || error])
 			});
+		} finally {
+			endImportTask(task, failed);
 		}
 	}
 
@@ -1212,7 +1481,9 @@
 			width: 520,
 			form: createOptionsForm(options, false),
 			onConfirm(form) {
+				this.hide();
 				importOBJAsCubes(file, normalizeOptions(form));
+				return false;
 			}
 		}).show();
 	}
@@ -1297,11 +1568,15 @@
 		textures.forEach(texture => {
 			let namespace = cleanName(texture.namespace || 'minecraft').replace(/[/:].*$/, '') || 'minecraft';
 			let folder = cleanName(texture.folder || 'block').replace(/^textures\//, '');
-			let destination_folder = joinPath(path_module, root_path, 'assets', namespace, 'textures', folder);
-			let destination_path = joinPath(path_module, destination_folder, texture.name || `${texture.id}.png`);
 			try {
+				let full_path = texture[TEXTURE_FULL_PATH_PROPERTY];
+				let relative = full_path ? full_path + '.png' : `${folder}/${pathBasename(texture.name || `${texture.id}.png`)}`;
+				if (relative.split(/[\\/]/).some(part => part === '..') || /[:\x00]/.test(relative)) throw new Error('Invalid texture resource path');
+				let destination_path = joinPath(path_module, root_path, 'assets', namespace, 'textures', relative);
+				let destination_folder = path_module.dirname(destination_path);
 				ensureDirectory(fs, destination_folder);
 				if (writeTextureFile(texture, destination_path, path_module)) {
+					if (texture[TEXTURE_ANIMATION_PROPERTY]?.animation) fs.writeFileSync(destination_path + '.mcmeta', JSON.stringify(texture[TEXTURE_ANIMATION_PROPERTY], null, 2));
 					copied++;
 				} else {
 					failed++;
@@ -1331,14 +1606,43 @@
 			let link = `${namespace}:${folder}/${name}`;
 
 			for (let key in event.model.textures) {
-				if (key === texture.id || event.model.textures[key] === texture.javaTextureLink()) {
-					event.model.textures[key] = link;
+				if (key === texture.id || compiledTextureLink(event.model.textures[key]) === texture.javaTextureLink()) {
+					setCompiledTextureLink(event.model.textures, key, link);
 				}
 			}
-			if (texture.particle && event.model.textures.particle === texture.javaTextureLink()) {
-				event.model.textures.particle = link;
+			if (texture.particle && compiledTextureLink(event.model.textures.particle) === texture.javaTextureLink()) {
+				setCompiledTextureLink(event.model.textures, 'particle', link);
 			}
 		});
+	}
+
+	function compiledTextureLink(value) {
+		return typeof value === 'object' && value ? (value.sprite ?? value.id) : value;
+	}
+
+	function attachTextureFrameLayout(texture) {
+		if (!texture[TEXTURE_FRAME_LAYOUT_PROPERTY]?.frames || (texture.flags?.has('cubizer_frame_layout') && Object.getOwnPropertyDescriptor(texture, 'frameCount')?.get)) return;
+		Object.defineProperty(texture, 'frameCount', {configurable: true, get() { let n = this[TEXTURE_FRAME_LAYOUT_PROPERTY]?.frames || 1; return n > 1 ? n : undefined; }});
+		let native = Texture.prototype.getMCMetaContent;
+		texture.getMCMetaContent = function() {
+			let result = native ? native.call(this) : {};
+			let metadata = this[TEXTURE_ANIMATION_PROPERTY];
+			if (metadata?.animation) {
+				let layout = this[TEXTURE_FRAME_LAYOUT_PROPERTY];
+				return {...metadata, animation: {...metadata.animation, ...result.animation, width: layout.width, height: layout.height}};
+			}
+			return result;
+		};
+		texture.flags?.add('cubizer_frame_layout');
+	}
+
+	function refreshTextureFrameLayouts() {
+		if (Project) Texture.all.forEach(attachTextureFrameLayout);
+	}
+
+	function setCompiledTextureLink(textures, key, link) {
+		if (typeof textures[key] === 'object' && textures[key]) textures[key][textures[key].sprite !== undefined ? 'sprite' : 'id'] = link;
+		else textures[key] = link;
 	}
 
 	function patchAllJavaTextureNamespaces(event) {
@@ -1368,12 +1672,25 @@
 		};
 		const DEFAULT_OPTIONS = {
 			create_project: true,
+			project_format: 'java_block',
+			block_scale: 1,
 			texture_namespace: 'minecraft',
 			texture_folder: 'block',
 			texture_source_path: '',
 			use_block_models: true,
 			cube_limit: 5000,
 			visible_faces_only: false,
+			merge_full_cubes: false,
+			merge_transparent: false,
+			grouping: 'auto',
+			animation_parts: [],
+			chunk_size: 16,
+			filter_bounds: false,
+			bounds_min: [0, 0, 0],
+			bounds_max: [15, 255, 15],
+			include_blocks: '',
+			exclude_blocks: '',
+			source_block_limit: 1000000,
 			move_to_origin: true,
 			center_model: false,
 			cull_faces: false
@@ -1510,6 +1827,12 @@
 		let texture_source_cache = {path: null, context: null};
 		let asset_cache = {};
 		let model_cache = {};
+		let full_cube_cache = new Map();
+		let state_cache = new Map();
+		let refs_cache = new Map();
+		let face_cache = new WeakMap();
+		let filter_cache = new Map();
+		let preview_sessions = new Set();
 
 		function addTranslations() {
 			if (typeof Language === 'undefined' || !Language.addTranslations) return;
@@ -1662,14 +1985,33 @@
 
 		function sanitizeOptions(options) {
 			options = options || {};
+			let min = vectorFrom(options.bounds_min, DEFAULT_OPTIONS.bounds_min).map(Math.floor);
+			let max = vectorFrom(options.bounds_max, DEFAULT_OPTIONS.bounds_max).map(Math.floor);
 			return {
 				create_project: options.create_project !== undefined ? !!options.create_project : DEFAULT_OPTIONS.create_project,
+				project_format: options.project_format === 'animated-java:format/blueprint' ? options.project_format : 'java_block',
+				block_scale: Math.max(0.01, Math.min(256, toNumber(options.block_scale, 1))),
 				texture_namespace: cleanName(options.texture_namespace || DEFAULT_OPTIONS.texture_namespace).replace(/[/:].*$/, '') || 'minecraft',
 				texture_folder: cleanName(options.texture_folder || DEFAULT_OPTIONS.texture_folder).replace(/^textures\//, '') || 'block',
 				texture_source_path: String(options.texture_source_path || '').trim().replace(/^"|"$/g, ''),
 				use_block_models: options.use_block_models !== undefined ? !!options.use_block_models : DEFAULT_OPTIONS.use_block_models,
 				cube_limit: Math.max(parseInt(options.cube_limit, 10) || DEFAULT_OPTIONS.cube_limit, 1),
 				visible_faces_only: options.visible_faces_only !== undefined ? !!options.visible_faces_only : DEFAULT_OPTIONS.visible_faces_only,
+				merge_full_cubes: !!options.merge_full_cubes,
+				merge_transparent: !!options.merge_transparent,
+				grouping: ['auto', 'block', 'chunk', 'single', 'parts'].includes(options.grouping) ? options.grouping : 'auto',
+				animation_parts: Array.isArray(options.animation_parts) ? options.animation_parts.map((part, i) => {
+					let pmin = vectorFrom(part.min), pmax = vectorFrom(part.max);
+					let min = pmin.map((v, a) => Math.floor(Math.min(v, pmax[a]))), max = pmin.map((v, a) => Math.floor(Math.max(v, pmax[a])));
+					return {name: cleanName(part.name || `part_${i + 1}`), min, max, pivot: vectorFrom(part.pivot, min.map((v, a) => (v + max[a] + 1) / 2))};
+				}) : [],
+				chunk_size: Math.max(1, Math.min(64, Math.floor(toNumber(options.chunk_size, 16)))),
+				filter_bounds: !!options.filter_bounds,
+				bounds_min: min.map((v, i) => Math.min(v, max[i])),
+				bounds_max: min.map((v, i) => Math.max(v, max[i])),
+				include_blocks: String(options.include_blocks || '').trim(),
+				exclude_blocks: String(options.exclude_blocks || '').trim(),
+				source_block_limit: Math.max(1, Math.min(5000000, Math.floor(toNumber(options.source_block_limit, 1000000)))),
 				move_to_origin: options.move_to_origin !== undefined ? !!options.move_to_origin : DEFAULT_OPTIONS.move_to_origin,
 				center_model: !!options.center_model,
 				cull_faces: !!options.cull_faces
@@ -1707,6 +2049,9 @@
 				asset_cache = {};
 				model_cache = {};
 			}
+			full_cube_cache.clear();
+			refs_cache.clear();
+			face_cache = new WeakMap();
 			try {
 				if (typeof localStorage !== 'undefined') {
 					localStorage.setItem(STORAGE_KEY, JSON.stringify(importer_options));
@@ -1731,6 +2076,13 @@
 					label: translate('form.create_project'),
 					type: 'checkbox',
 					value: options.create_project
+				},
+				project_format: {
+					label: translate('form.project_format'), type: 'select', value: options.project_format,
+					options: {'java_block': 'Java Block/Item', 'animated-java:format/blueprint': 'Animated Java Blueprint'}
+				},
+				block_scale: {
+					label: translate('form.block_scale'), type: 'number', value: options.block_scale, min: 0.01, max: 256
 				},
 				texture_namespace: {
 					label: translate('form.texture_namespace'),
@@ -1775,6 +2127,20 @@
 					type: 'info',
 					text: translate('form.cube_limit_note')
 				},
+				visible_faces_only: {label: translate('form.visible_faces_only'), type: 'checkbox', value: options.visible_faces_only},
+				merge_full_cubes: {label: translate('form.merge_full_cubes'), type: 'checkbox', value: options.merge_full_cubes},
+				merge_transparent: {label: translate('form.merge_transparent'), type: 'checkbox', value: options.merge_transparent, condition: form => form.merge_full_cubes},
+				grouping: {
+					label: translate('form.grouping'), type: 'select', value: options.grouping,
+					options: {auto: translate('form.group_auto'), block: translate('form.group_block'), chunk: translate('form.group_chunk'), single: translate('form.group_single'), parts: translate('form.group_parts')}
+				},
+				chunk_size: {label: translate('form.chunk_size'), type: 'number', value: options.chunk_size, min: 1, max: 64, condition: form => ['auto', 'chunk'].includes(form.grouping)},
+				filter_bounds: {label: translate('form.filter_bounds'), type: 'checkbox', value: options.filter_bounds},
+				bounds_min: {label: translate('form.bounds_min'), type: 'vector', dimensions: 3, value: options.bounds_min, condition: form => form.filter_bounds},
+				bounds_max: {label: translate('form.bounds_max'), type: 'vector', dimensions: 3, value: options.bounds_max, condition: form => form.filter_bounds},
+				include_blocks: {label: translate('form.include_blocks'), type: 'text', value: options.include_blocks},
+				exclude_blocks: {label: translate('form.exclude_blocks'), type: 'text', value: options.exclude_blocks},
+				source_block_limit: {label: translate('form.source_block_limit'), type: 'number', value: options.source_block_limit, min: 1, max: 5000000, step: 10000},
 				move_to_origin: {
 					label: translate('form.move_to_origin'),
 					type: 'checkbox',
@@ -1850,6 +2216,12 @@
 			return (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
 		}
 
+		function readUInt64LE(bytes, offset) {
+			let value = readUInt32LE(bytes, offset) + readUInt32LE(bytes, offset + 4) * 4294967296;
+			if (!Number.isSafeInteger(value)) throw new Error('ZIP64 offset exceeds safe integer range');
+			return value;
+		}
+
 		function findZipEndOfCentralDirectory(bytes) {
 			let min = Math.max(0, bytes.length - 0xffff - 22);
 			for (let offset = bytes.length - 22; offset >= min; offset--) {
@@ -1860,17 +2232,29 @@
 			return -1;
 		}
 
-		function createZipIndex(zip_path) {
+		function createZipIndex(zip_path, archive_bytes) {
 			let fs = getNativeModule('fs', {optional: true});
 			if (!fs || !fs.readFileSync) throw new Error('Cannot read zip or jar file');
-			let bytes = toUint8Array(fs.readFileSync(zip_path));
-			let end = findZipEndOfCentralDirectory(bytes);
+			// Newer Blockbench scoped FS omits open/read/close; reuse one async-loaded buffer there.
+			if (!archive_bytes && typeof fs.openSync !== 'function') archive_bytes = toUint8Array(fs.readFileSync(zip_path));
+			let range = (offset, length) => archive_bytes ? archive_bytes.subarray(offset, offset + length) : readZipRange(fs, zip_path, offset, length);
+			let size = fs.statSync(zip_path).size, tail_start = Math.max(0, size - 65557);
+			let tail = range(tail_start, size - tail_start);
+			let end = findZipEndOfCentralDirectory(tail);
 			if (end < 0) throw new Error('Invalid zip or jar file');
 
-			let entry_count = readUInt16LE(bytes, end + 10);
-			let central_offset = readUInt32LE(bytes, end + 16);
+			let entry_count = readUInt16LE(tail, end + 10);
+			let central_offset = readUInt32LE(tail, end + 16), central_size = readUInt32LE(tail, end + 12);
+			if (entry_count === 65535 || central_offset === 0xffffffff || central_size === 0xffffffff) {
+				if (readUInt32LE(tail, end - 20) !== 0x07064b50) throw new Error('Missing ZIP64 locator');
+				let record = range(readUInt64LE(tail, end - 12), 56);
+				if (readUInt32LE(record, 0) !== 0x06064b50) throw new Error('Invalid ZIP64 directory');
+				entry_count = readUInt64LE(record, 32); central_size = readUInt64LE(record, 40); central_offset = readUInt64LE(record, 48);
+			}
+			if (central_offset + central_size > size) throw new Error('Invalid zip directory');
+			let bytes = range(central_offset, central_size);
 			let entries = {};
-			let offset = central_offset;
+			let offset = 0;
 
 			for (let i = 0; i < entry_count && offset + 46 <= bytes.length; i++) {
 				if (readUInt32LE(bytes, offset) !== 0x02014b50) break;
@@ -1881,34 +2265,56 @@
 				let extra_length = readUInt16LE(bytes, offset + 30);
 				let comment_length = readUInt16LE(bytes, offset + 32);
 				let local_offset = readUInt32LE(bytes, offset + 42);
+				for (let extra = offset + 46 + name_length; extra + 4 <= offset + 46 + name_length + extra_length;) {
+					let id = readUInt16LE(bytes, extra), length = readUInt16LE(bytes, extra + 2), value = extra + 4;
+					if (id === 1) {
+						if (uncompressed_size === 0xffffffff) { uncompressed_size = readUInt64LE(bytes, value); value += 8; }
+						if (compressed_size === 0xffffffff) { compressed_size = readUInt64LE(bytes, value); value += 8; }
+						if (local_offset === 0xffffffff) local_offset = readUInt64LE(bytes, value);
+					}
+					extra += 4 + length;
+				}
 				let name = decodeUtf8(bytes.slice(offset + 46, offset + 46 + name_length)).replace(/\\/g, '/');
-				entries[name] = {method, compressed_size, uncompressed_size, local_offset};
-				if (name.toLowerCase() !== name) entries[name.toLowerCase()] = entries[name];
+				if (name.startsWith('assets/')) {
+					entries[name] = {method, compressed_size, uncompressed_size, local_offset};
+					if (name.toLowerCase() !== name) entries[name.toLowerCase()] = entries[name];
+				}
 				offset += 46 + name_length + extra_length + comment_length;
 			}
 
-			return {path: zip_path, bytes, entries};
+			return {path: zip_path, fs, range, entries, cache: new Map(), cache_bytes: 0};
+		}
+
+		function readZipRange(fs, path, offset, length) {
+			let fd = fs.openSync(path, 'r');
+			try {
+				let data = toNodeBuffer(new Uint8Array(length)), read = 0;
+				while (read < length) { let count = fs.readSync(fd, data, read, length - read, offset + read); if (!count) throw new Error('Unexpected zip EOF'); read += count; }
+				return toUint8Array(data);
+			} finally { fs.closeSync(fd); }
 		}
 
 		function extractZipEntry(zip, entry_name) {
 			if (!zip || !zip.entries) return null;
 			let entry = zip.entries[entry_name] || zip.entries[entry_name.toLowerCase()];
 			if (!entry) return null;
-			let bytes = zip.bytes;
-			let offset = entry.local_offset;
-			if (readUInt32LE(bytes, offset) !== 0x04034b50) return null;
-			let name_length = readUInt16LE(bytes, offset + 26);
-			let extra_length = readUInt16LE(bytes, offset + 28);
-			let data_start = offset + 30 + name_length + extra_length;
-			let compressed = bytes.slice(data_start, data_start + entry.compressed_size);
+			if (zip.cache.has(entry)) return zip.cache.get(entry);
+			let header = zip.range(entry.local_offset, 30);
+			if (readUInt32LE(header, 0) !== 0x04034b50) return null;
+			let data_start = entry.local_offset + 30 + readUInt16LE(header, 26) + readUInt16LE(header, 28);
+			let compressed = zip.range(data_start, entry.compressed_size), result;
 
-			if (entry.method === 0) return compressed;
-			if (entry.method === 8) {
+			if (entry.method === 0) result = compressed;
+			else if (entry.method === 8) {
 				let zlib = getNativeModule('zlib');
 				if (!zlib) return null;
-				return toUint8Array(zlib.inflateRawSync(toNodeBuffer(compressed)));
+				result = toUint8Array(zlib.inflateRawSync(toNodeBuffer(compressed)));
+			} else return null;
+			while (zip.cache_bytes + result.length > 16 * 1024 * 1024 && zip.cache.size) {
+				let oldest = zip.cache.keys().next().value; zip.cache_bytes -= zip.cache.get(oldest).length; zip.cache.delete(oldest);
 			}
-			return null;
+			if (result.length <= 16 * 1024 * 1024) { zip.cache.set(entry, result); zip.cache_bytes += result.length; }
+			return result;
 		}
 
 		function findLatestMinecraftJar(fs, path_module) {
@@ -1939,6 +2345,8 @@
 		}
 
 		function getTextureSourceContext(options) {
+			let explicit_path = String(options.texture_source_path || '').trim().replace(/^"|"$/g, '');
+			if (explicit_path && texture_source_cache.path === explicit_path) return texture_source_cache.context;
 			let fs = getNativeModule('fs', {optional: true});
 			let path_module = getNativeModule('path');
 			let source_path = String(options.texture_source_path || '').trim().replace(/^"|"$/g, '');
@@ -1969,6 +2377,17 @@
 
 			texture_source_cache = {path: source_path, context};
 			return context;
+		}
+
+		async function prepareTextureSource(options, task) {
+			let fs = getNativeModule('fs', {optional: true}), path_module = getNativeModule('path');
+			if (!fs || typeof fs.openSync === 'function') return;
+			let source_path = String(options.texture_source_path || '').trim().replace(/^"|"$/g, '') || findLatestMinecraftJar(fs, path_module);
+			if (!source_path || texture_source_cache.path === source_path || !/\.(jar|zip)$/i.test(source_path) || !isFile(fs, source_path)) return;
+			if (task.dialog.content_vue) task.dialog.content_vue.status = translate('phase.assets');
+			let data = await new Promise((resolve, reject) => fs.readFile(source_path, null, (error, bytes) => error ? reject(error) : resolve(bytes)));
+			await yieldImport(task, 0, 1);
+			texture_source_cache = {path: source_path, context: {type: 'zip', path: source_path, zip: createZipIndex(source_path, toUint8Array(data))}};
 		}
 
 		class NbtReader {
@@ -2047,7 +2466,7 @@
 				let length = this.readInt();
 				if (length < 0) throw new Error('Invalid NBT byte array length');
 				this.ensure(length);
-				let bytes = this.bytes.slice(this.offset, this.offset + length);
+				let bytes = this.bytes.subarray(this.offset, this.offset + length);
 				this.offset += length;
 				return bytes;
 			}
@@ -2093,7 +2512,8 @@
 							let child_type = this.readUnsignedByte();
 							if (child_type === 0) break;
 							let name = this.readString();
-							value[name] = this.readPayload(child_type);
+							if (/^(nbt|entities|tileentities|blockentities|block_entities)$/i.test(name)) this.skipPayload(child_type);
+							else value[name] = this.readPayload(child_type);
 						}
 						return value;
 					}
@@ -2101,6 +2521,29 @@
 					case 12: return this.readLongArray();
 					default: throw new Error(`Unsupported NBT tag type ${type}`);
 				}
+			}
+
+			skipPayload(type) {
+				const sizes = {0: 0, 1: 1, 2: 2, 3: 4, 4: 8, 5: 4, 6: 8};
+				if (sizes[type] !== undefined) { this.ensure(sizes[type]); this.offset += sizes[type]; return; }
+				if (type === 8) { let n = this.readUnsignedShort(); this.ensure(n); this.offset += n; return; }
+				if ([7, 11, 12].includes(type)) {
+					let n = this.readInt() * ({7: 1, 11: 4, 12: 8}[type]);
+					if (n < 0) throw new Error('Invalid NBT array length');
+					this.ensure(n); this.offset += n; return;
+				}
+				if (type === 9) {
+					let child = this.readUnsignedByte(), n = this.readInt();
+					if (n < 0) throw new Error('Invalid NBT list length');
+					if (sizes[child] !== undefined) { this.ensure(sizes[child] * n); this.offset += sizes[child] * n; }
+					else for (let i = 0; i < n; i++) this.skipPayload(child);
+					return;
+				}
+				if (type === 10) {
+					for (let child = this.readUnsignedByte(); child; child = this.readUnsignedByte()) { this.skipPayload(8); this.skipPayload(child); }
+					return;
+				}
+				throw new Error(`Unsupported NBT tag type ${type}`);
 			}
 		}
 
@@ -2190,7 +2633,7 @@
 		}
 
 		function legacyBlockName(id, data) {
-			id = Number(id) & 255;
+			id = Number(id) & 4095;
 			data = Number(data) & 15;
 			if (id === 35) return `minecraft:${COLOR_NAMES[data] || 'white'}_wool`;
 			if (id === 95) return `minecraft:${COLOR_NAMES[data] || 'white'}_stained_glass`;
@@ -2541,7 +2984,7 @@
 				}
 				offset = data_start + length + 4;
 			}
-			if (!width || !height || bit_depth !== 8 || !idat_chunks.length) return null;
+			if (!width || !height || width * height > 16777216 || bit_depth !== 8 || !idat_chunks.length) return null;
 
 			let zlib = getNativeModule('zlib');
 			if (!zlib) return null;
@@ -2549,6 +2992,7 @@
 			let bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type];
 			if (!bpp) return null;
 			let stride = width * bpp;
+			if (inflated.length < (stride + 1) * height) return null;
 			let rgba = new Uint8Array(width * height * 4);
 			let previous = new Uint8Array(stride);
 			let source = 0;
@@ -2580,7 +3024,8 @@
 						rgba[output] = row[input];
 						rgba[output + 1] = row[input + 1];
 						rgba[output + 2] = row[input + 2];
-						rgba[output + 3] = 255;
+						let transparent = transparency?.length >= 6 && row[input] === ((transparency[0] << 8) | transparency[1]) && row[input + 1] === ((transparency[2] << 8) | transparency[3]) && row[input + 2] === ((transparency[4] << 8) | transparency[5]);
+						rgba[output + 3] = transparent ? 0 : 255;
 					} else if (color_type === 3) {
 						let index = row[input] * 3;
 						rgba[output] = palette ? palette[index] || 0 : 0;
@@ -2596,7 +3041,8 @@
 						rgba[output] = row[input];
 						rgba[output + 1] = row[input];
 						rgba[output + 2] = row[input];
-						rgba[output + 3] = 255;
+						let transparent = transparency?.length >= 2 && row[input] === ((transparency[0] << 8) | transparency[1]);
+						rgba[output + 3] = transparent ? 0 : 255;
 					}
 				}
 				previous = row;
@@ -2700,6 +3146,10 @@
 				if (!bytes) return false;
 				let tinted = tintPngBytes(bytes, info.tint_rgb);
 				if (!tinted) return false;
+				let width = readUint32BEUnsigned(bytes, 16), height = readUint32BEUnsigned(bytes, 20);
+				let frame_height = texture[TEXTURE_ANIMATION_PROPERTY]?.animation?.height || (texture[TEXTURE_ANIMATION_PROPERTY]?.animation ? width : height);
+				texture[TEXTURE_FRAME_LAYOUT_PROPERTY] = {width, height: frame_height, frames: Math.max(1, Math.floor(height / frame_height))}; attachTextureFrameLayout(texture);
+				primeTextureImage(texture, width, height);
 				texture.fromDataURL(toDataUrl(tinted, 'image/png'));
 				markPreviewOnlyTexture(texture);
 				return true;
@@ -2710,18 +3160,33 @@
 		}
 
 		function loadTextureImage(texture, info, options) {
+			let context = getTextureSourceContext(options);
+			let meta = readJsonAsset(context, `assets/${info.namespace || 'minecraft'}/textures/${info.full_path || info.path}.png.mcmeta`);
+			if (meta?.animation) {
+				texture[TEXTURE_ANIMATION_PROPERTY] = meta;
+				texture.frame_time = meta.animation.frametime || 1; texture.frame_interpolate = !!meta.animation.interpolate;
+				if (meta.animation.frames) { texture.frame_order_type = 'custom'; texture.frame_order = meta.animation.frames.map(f => typeof f === 'number' ? f : `${f.index}:${f.time || texture.frame_time}`).join(' '); }
+			}
+			function layoutFromBytes(bytes) {
+				let width = readUint32BEUnsigned(bytes, 16), height = readUint32BEUnsigned(bytes, 20);
+				let frame_height = meta?.animation ? (meta.animation.height || width) : height;
+				texture[TEXTURE_FRAME_LAYOUT_PROPERTY] = {width, height: frame_height, frames: Math.max(1, Math.floor(height / frame_height))}; attachTextureFrameLayout(texture);
+				primeTextureImage(texture, width, height);
+			}
 			if (loadTintedTextureImage(texture, info, options)) {
 				return true;
 			}
-			let context = getTextureSourceContext(options);
 			let file_path = findTextureFileInFolder(context, info, options);
 			if (file_path) {
+				let header = typeof context.fs.openSync === 'function' ? readZipRange(context.fs, file_path, 0, 24) : toUint8Array(context.fs.readFileSync(file_path)).subarray(0, 24);
+				layoutFromBytes(header);
 				texture.fromPath(file_path);
 				return true;
 			}
 
 			let zip_data = findTextureDataInZip(context, info, options);
 			if (zip_data) {
+				layoutFromBytes(zip_data);
 				texture.fromDataURL(toDataUrl(zip_data, 'image/png'));
 				markPreviewOnlyTexture(texture);
 				return true;
@@ -2737,8 +3202,12 @@
 
 		function createTextureForInfo(info, options, texture_map, new_textures) {
 			let tint_key = info.tint_id || (info.tint_rgb ? info.tint_rgb.join('_') : '');
-			let texture_key = `${info.namespace || 'minecraft'}:${info.full_path || info.path}${tint_key ? `|${tint_key}` : ''}`;
+			let texture_key = `${info.namespace || 'minecraft'}:${info.full_path || info.path}${tint_key ? `|${tint_key}` : ''}${info.force_translucent ? '|translucent' : ''}`;
 			if (texture_map[texture_key]) return texture_map[texture_key];
+			let source_key = `${getTextureSourceContext(options).path}|${texture_key}`;
+			let full_path = cleanTextureFullPath(info.full_path || `${options.texture_folder || 'block'}/${info.path || 'texture'}`);
+			let existing = Texture.all.find(texture => texture[IMPORTED_PROPERTY] && !texture.error && texture[TEXTURE_CACHE_KEY_PROPERTY] === source_key && texture[TEXTURE_FULL_PATH_PROPERTY] === full_path && texture.namespace === options.texture_namespace);
+			if (existing) return texture_map[texture_key] = existing;
 
 			let texture_base = info.path || info.full_path || 'texture';
 			let texture_id = uniqueTextureId(tint_key ? `${texture_base}_${tint_key}` : texture_base);
@@ -2749,18 +3218,18 @@
 			texture.folder = options.texture_folder;
 			texture.namespace = options.texture_namespace;
 			loadTextureImage(texture, info, options);
-			if (info.uv_width && info.uv_height) {
-				texture.uv_width = info.uv_width;
-				texture.uv_height = info.uv_height;
-			}
+			texture.uv_width = info.uv_width || 16;
+			texture.uv_height = info.uv_height || 16;
 			texture.id = texture_id;
 			texture.name = texture_name;
 			texture.folder = options.texture_folder;
 			texture.namespace = options.texture_namespace;
+			if (info.force_translucent) texture.force_translucent = true;
 			texture[IMPORTED_PROPERTY] = true;
-			texture[TEXTURE_FULL_PATH_PROPERTY] = cleanTextureFullPath(info.full_path || `${options.texture_folder || 'block'}/${info.path || texture_id}`);
+			texture[TEXTURE_FULL_PATH_PROPERTY] = full_path;
+			texture[TEXTURE_CACHE_KEY_PROPERTY] = source_key;
 			if (texture.flags) texture.flags.add(PLUGIN_ID);
-			texture.add(false, true);
+			texture.add(false, false);
 			texture_map[texture_key] = texture;
 			new_textures.push(texture);
 			return texture;
@@ -2833,6 +3302,7 @@
 		}
 
 		function parseBlockState(state) {
+			if (state_cache.has(state)) return state_cache.get(state);
 			let raw = String(state || 'minecraft:air');
 			let property_text = '';
 			let bracket = raw.indexOf('[');
@@ -2849,12 +3319,14 @@
 				if (eq < 0) return;
 				properties[part.substring(0, eq)] = part.substring(eq + 1);
 			});
-			return {
+			let parsed = {
 				id: raw,
 				namespace: parts[0] || 'minecraft',
 				name: parts[1] || parts[0],
 				properties
 			};
+			state_cache.set(state, parsed);
+			return parsed;
 		}
 
 		function variantKeyMatches(key, properties) {
@@ -2916,9 +3388,10 @@
 
 		function selectBlockModelRefs(state, options) {
 			if (!options.use_block_models) return [];
+			if (refs_cache.has(state)) return refs_cache.get(state);
 			let parsed = parseBlockState(state);
 			let blockstate = readBlockstateForParsed(parsed, options);
-			if (!blockstate) return [];
+			if (!blockstate) { refs_cache.set(state, []); return []; }
 
 			let refs = [];
 			if (blockstate.variants && typeof blockstate.variants === 'object') {
@@ -2940,11 +3413,12 @@
 					if (ref) refs.push(ref);
 				});
 			}
+			refs_cache.set(state, refs);
 			return refs;
 		}
 
 		function blockIdFromState(state) {
-			return parseBlockState(state).id;
+			return blockNameFromState(state);
 		}
 
 		function fallbackReasonForBlock(block, options, model_source_ok) {
@@ -3045,7 +3519,9 @@
 
 		function resolveTextureReference(model, reference) {
 			if (!reference) return {link: '', namespace: model?.__namespace || 'minecraft'};
-			let value = String(reference);
+			let force_translucent = !!reference?.force_translucent;
+			let value = compiledTextureLink(reference);
+			if (typeof value !== 'string') return {link: '', namespace: model?.__namespace || 'minecraft'};
 			let scopes = model?.__texture_scopes?.length
 				? model.__texture_scopes
 				: [{textures: model?.textures || {}, namespace: model?.__namespace || 'minecraft'}];
@@ -3057,7 +3533,9 @@
 				for (let scope of scopes) {
 					let textures = scope?.textures || scope;
 					if (textures && textures[key] !== undefined) {
-						value = String(textures[key]);
+						force_translucent = force_translucent || !!textures[key]?.force_translucent;
+						value = compiledTextureLink(textures[key]);
+						if (typeof value !== 'string') return {link: '', namespace};
 						namespace = scope?.namespace || namespace;
 						found = true;
 						break;
@@ -3067,7 +3545,7 @@
 			}
 			return {
 				link: value.startsWith('#') ? '' : value,
-				namespace
+				namespace, force_translucent
 			};
 		}
 
@@ -3284,6 +3762,9 @@
 		}
 
 		function createModelElementFaces(element, model, variant, block, options, occupied, texture_map, new_textures) {
+			let cache_key = `${block.state}|${variant.x || 0}|${variant.y || 0}|${!!variant.uvlock}`;
+			let cached = face_cache.get(element);
+			if (!options.visible_faces_only && cached?.has(cache_key)) return cached.get(cache_key);
 			let faces = {};
 			FACE_DIRECTIONS.forEach(direction => {
 				faces[direction] = {texture: null};
@@ -3294,11 +3775,19 @@
 				let read_face = element.faces[direction];
 				let output_direction = rotateDirection(direction, variant);
 				let cullface = read_face.cullface ? rotateDirection(read_face.cullface, variant) : '';
+				if (options.visible_faces_only && cullface && !element.rotation) {
+					let axis = {north: 2, south: 2, east: 0, west: 0, up: 1, down: 1}[direction];
+					let positive = ['south', 'east', 'up'].includes(direction);
+					let boundary = positive ? element.to?.[axis] === 16 : element.from?.[axis] === 0;
+					let delta = DIRECTIONS[cullface]?.delta;
+					if (boundary && delta && occupied.has(`${block.x + delta[0]},${block.y + delta[1]},${block.z + delta[2]}`)) return;
+				}
 				let resolved_texture = resolveTextureReference(model, read_face.texture);
 				let texture_info = resolved_texture.link
 					? textureInfoFromLink(resolved_texture.link, block.state, resolved_texture.namespace)
 					: textureInfoFromState(block.state);
 				let tint_info = typeof read_face.tintindex === 'number' ? tintInfoForBlockFace(block.state, read_face.tintindex) : null;
+				if (resolved_texture.force_translucent) texture_info.force_translucent = true;
 				if (tint_info) {
 					texture_info = Object.assign({}, texture_info, {
 						tint_rgb: tint_info.rgb,
@@ -3309,7 +3798,7 @@
 				let face_rotation = rotatedFaceUvRotation(direction, output_direction, read_face, variant);
 				let face_uv = Array.isArray(read_face.uv) ? read_face.uv.slice() : defaultJavaFaceUv(element, direction);
 				faces[output_direction] = {
-					uv: face_uv,
+					uv: uvForProject(face_uv, 16, 16, texture),
 					texture: texture ? texture.uuid : false,
 					rotation: face_rotation
 				};
@@ -3317,6 +3806,10 @@
 				if (options.cull_faces && cullface) faces[output_direction].cullface = cullface;
 				has_face = true;
 			});
+			if (!options.visible_faces_only) {
+				if (!cached) face_cache.set(element, cached = new Map());
+				cached.set(cache_key, has_face ? faces : null);
+			}
 			return has_face ? faces : null;
 		}
 
@@ -3404,7 +3897,8 @@
 				for (let z = 0; z < length; z++) {
 					for (let x = 0; x < width; x++) {
 						let index = (y * length + z) * width + x;
-						let state = legacyBlockName(block_ids[index], getNibble(data, index));
+						let id = (block_ids[index] & 255) | (getNibble(nbt.AddBlocks, index) << 8);
+						let state = legacyBlockName(id, data?.[index] & 15);
 						if (!isAirState(state)) blocks.push({x, y, z, state});
 					}
 				}
@@ -3477,16 +3971,17 @@
 
 				let palette_states = palette.map(blockStateFromPaletteEntry);
 				let count = width * height * length;
-				let indices = decodePackedStates(states, count, palette_states.length, 2);
+				let bits = Math.max(2, Math.ceil(Math.log2(Math.max(palette_states.length, 1))));
+				let indices = decodePackedCompact(states, count, bits);
 				for (let i = 0; i < count; i++) {
 					let state = palette_states[indices[i]] || 'minecraft:air';
 					if (isAirState(state)) continue;
 					let local_x = i % width;
 					let local_z = Math.floor(i / width) % length;
 					let local_y = Math.floor(i / (width * length));
-					let x = position[0] + (size[0] < 0 ? -local_x : local_x);
-					let y = position[1] + (size[1] < 0 ? -local_y : local_y);
-					let z = position[2] + (size[2] < 0 ? -local_z : local_z);
+					let x = position[0] + Math.min(0, size[0] + 1) + local_x;
+					let y = position[1] + Math.min(0, size[1] + 1) + local_y;
+					let z = position[2] + Math.min(0, size[2] + 1) + local_z;
 					blocks.push({x, y, z, state, region: region_name});
 				}
 			});
@@ -3495,7 +3990,7 @@
 		}
 
 		function parseNbtStructure(root, source_name, extension) {
-			let nbt = root.value || {};
+			let nbt = root.value?.Schematic || root.value || {};
 			if (extension === 'litematic' || nbt.Regions || nbt.regions) return parseLitematic(nbt, source_name);
 			if ((nbt.size || nbt.Size) && (nbt.palette || nbt.Palette || nbt.palettes) && (nbt.blocks || nbt.Blocks)) {
 				return parseStructureNbt(nbt, source_name);
@@ -3517,29 +4012,32 @@
 			throw new Error(`Unsupported region chunk compression type ${compression_type}`);
 		}
 
-		function extractLegacySectionBlocks(section, chunk_x, chunk_z, blocks, limit) {
-			let section_y = toNumber(section.Y || section.y);
+		function extractLegacySectionBlocks(section, chunk_x, chunk_z, blocks, limit, options) {
+			let section_y = toNumber(section.Y ?? section.y);
 			let block_ids = section.Blocks;
 			let data = section.Data;
 			if (!block_ids) return;
 			for (let i = 0; i < 4096 && blocks.length < limit; i++) {
-				let state = legacyBlockName(block_ids[i], getNibble(data, i));
+				let state = legacyBlockName((block_ids[i] & 255) | (getNibble(section.Add, i) << 8), getNibble(data, i));
 				if (isAirState(state)) continue;
 				let x = chunk_x * 16 + (i & 15);
 				let z = chunk_z * 16 + ((i >> 4) & 15);
 				let y = section_y * 16 + (i >> 8);
-				blocks.push({x, y, z, state});
+				let block = {x, y, z, state};
+				if (!options || blockMatchesFilters(block, options)) blocks.push(block);
 			}
 		}
 
-		function extractPaletteSectionBlocks(section, chunk_x, chunk_z, blocks, limit) {
+		function extractPaletteSectionBlocks(section, chunk_x, chunk_z, blocks, limit, options, data_version) {
 			let block_states = section.block_states || section.BlockStatesCompound || null;
 			let palette = block_states ? block_states.palette : (section.Palette || section.palette);
 			let packed = block_states ? block_states.data : (section.BlockStates || section.blockStates);
 			if (!Array.isArray(palette)) return false;
 			let section_y = toNumber(section.Y !== undefined ? section.Y : section.y);
 			let palette_states = palette.map(blockStateFromPaletteEntry);
-			let indices = decodePackedStates(packed || [], 4096, palette_states.length, 4);
+			let bits = Math.max(4, Math.ceil(Math.log2(Math.max(palette_states.length, 1))));
+			let indices = data_version === undefined ? decodePackedStates(packed || [], 4096, palette_states.length, 4)
+				: (data_version >= 2529 ? decodePackedPadded(packed || [], 4096, bits) : decodePackedCompact(packed || [], 4096, bits));
 
 			for (let i = 0; i < 4096 && blocks.length < limit; i++) {
 				let state = palette_states[indices[i]] || 'minecraft:air';
@@ -3547,25 +4045,28 @@
 				let x = chunk_x * 16 + (i & 15);
 				let z = chunk_z * 16 + ((i >> 4) & 15);
 				let y = section_y * 16 + (i >> 8);
-				blocks.push({x, y, z, state});
+				let block = {x, y, z, state};
+				if (!options || blockMatchesFilters(block, options)) blocks.push(block);
 			}
 			return true;
 		}
 
-		function extractChunkBlocks(root, chunk_x, chunk_z, blocks, limit) {
+		function extractChunkBlocks(root, chunk_x, chunk_z, blocks, limit, options) {
 			let chunk = root.value || {};
 			let level = chunk.Level || chunk;
 			let sections = level.sections || level.Sections || [];
 			if (!Array.isArray(sections)) return;
 			for (let section of sections) {
 				if (blocks.length >= limit) break;
-				if (!extractPaletteSectionBlocks(section, chunk_x, chunk_z, blocks, limit)) {
-					extractLegacySectionBlocks(section, chunk_x, chunk_z, blocks, limit);
+				let y = toNumber(section.Y ?? section.y) * 16;
+				if (options?.filter_bounds && (y > options.bounds_max[1] || y + 15 < options.bounds_min[1])) continue;
+				if (!extractPaletteSectionBlocks(section, chunk_x, chunk_z, blocks, limit, options, chunk.DataVersion)) {
+					extractLegacySectionBlocks(section, chunk_x, chunk_z, blocks, limit, options);
 				}
 			}
 		}
 
-		function parseAnvilRegion(buffer, source_name, options) {
+		async function parseAnvilRegion(buffer, source_name, options, task) {
 			let bytes = toUint8Array(buffer);
 			if (bytes.length < 8192) throw new Error('Invalid .mca region file');
 			let match = pathBasename(source_name).match(/^r\.(-?\d+)\.(-?\d+)\.mca$/i);
@@ -3574,29 +4075,30 @@
 			let blocks = [];
 			let parsed_chunks = 0;
 			let failed_chunks = 0;
-			let limit = options.cube_limit * 2;
+			let source_limit = options.source_block_limit || 1000000;
+			let limit = source_limit + 1;
 
 			for (let index = 0; index < 1024 && blocks.length < limit; index++) {
+				if (task && index % 8 === 0) await yieldImport(task, index, 1024);
+				let chunk_x = region_x * 32 + (index & 31);
+				let chunk_z = region_z * 32 + (index >> 5);
+				if (options.filter_bounds && (chunk_x * 16 > options.bounds_max[0] || chunk_x * 16 + 15 < options.bounds_min[0] || chunk_z * 16 > options.bounds_max[2] || chunk_z * 16 + 15 < options.bounds_min[2])) continue;
 				let offset = index * 4;
 				let sector = (bytes[offset] << 16) | (bytes[offset + 1] << 8) | bytes[offset + 2];
 				let sector_count = bytes[offset + 3];
 				if (!sector || !sector_count) continue;
 
 				let chunk_start = sector * 4096;
-				if (chunk_start + 5 > bytes.length) continue;
+				if (chunk_start + 5 > bytes.length) { failed_chunks++; continue; }
 				let length = readInt32BE(bytes, chunk_start);
 				let compression_type = bytes[chunk_start + 4];
-				if (length <= 1 || chunk_start + 4 + length > bytes.length) continue;
+				if (length <= 1 || chunk_start + 4 + length > bytes.length || length + 4 > sector_count * 4096) { failed_chunks++; continue; }
 
 				try {
 					let payload = bytes.slice(chunk_start + 5, chunk_start + 4 + length);
 					let nbt_buffer = decompressRegionChunk(compression_type, payload);
 					let root = parseNbt(nbt_buffer);
-					let local_x = index & 31;
-					let local_z = index >> 5;
-					let chunk_x = region_x * 32 + local_x;
-					let chunk_z = region_z * 32 + local_z;
-					extractChunkBlocks(root, chunk_x, chunk_z, blocks, limit);
+					extractChunkBlocks(root, chunk_x, chunk_z, blocks, limit, options);
 					parsed_chunks++;
 				} catch (error) {
 					console.warn(error);
@@ -3604,11 +4106,231 @@
 				}
 			}
 
-			return makeStructure(source_name, 'Anvil Region MCA', blocks, {parsed_chunks, failed_chunks});
+			let read_limited = blocks.length > source_limit;
+			if (read_limited) blocks.length = source_limit;
+			return makeStructure(source_name, 'Anvil Region MCA', blocks, {parsed_chunks, failed_chunks, read_limited});
 		}
 
 		function keyForBlock(block) {
 			return `${block.x},${block.y},${block.z}`;
+		}
+
+		function blockMatchesFilters(block, options) {
+			if (options.filter_bounds && [block.x, block.y, block.z].some((v, i) => v < options.bounds_min[i] || v > options.bounds_max[i])) return false;
+			let id = blockIdFromState(block.state);
+			function matches(list) {
+				if (!filter_cache.has(list)) filter_cache.set(list, String(list || '').split(/[\s,;]+/).filter(Boolean).map(pattern => {
+					if (!pattern.includes(':')) pattern = 'minecraft:' + pattern;
+					let escaped = pattern.split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+					return new RegExp('^' + escaped + '$');
+				}));
+				return filter_cache.get(list).some(regex => regex.test(id));
+			}
+			return (!options.include_blocks || matches(options.include_blocks)) && !matches(options.exclude_blocks);
+		}
+
+		function readTexturePixels(info, options, image_cache) {
+			let key = `${info.namespace}:${info.full_path || info.path}|${info.tint_rgb || ''}`;
+			if (image_cache.has(key)) return image_cache.get(key);
+			let image = null;
+			try {
+				let context = getTextureSourceContext(options);
+				let path = findTextureFileInFolder(context, info, options);
+				let bytes = path ? context.fs.readFileSync(path) : findTextureDataInZip(context, info, options);
+				if (bytes && readUint32BEUnsigned(bytes, 16) <= 256 && readUint32BEUnsigned(bytes, 20) <= 4096) image = decodePngToRgba(bytes);
+				if (image) {
+					let meta = readJsonAsset(context, `assets/${info.namespace}/textures/${info.full_path || info.path}.png.mcmeta`);
+					image.animation = meta?.animation;
+					image.frame_height = image.animation ? (image.animation.height || image.width) : image.height;
+					if ((image.animation?.width && image.animation.width !== image.width) || image.frame_height <= 0 || image.height % image.frame_height) image = null;
+				}
+				if (image) {
+					image.frames = image.height / image.frame_height; image.opaque = !info.force_translucent;
+					for (let i = 3; i < image.rgba.length; i += 4) {
+						if (image.rgba[i] !== 255) image.opaque = false;
+						if (info.tint_rgb) for (let c = 0; c < 3; c++) image.rgba[i - 3 + c] = Math.round(image.rgba[i - 3 + c] * info.tint_rgb[c]);
+					}
+				}
+			} catch (error) { console.warn('Skipping cube optimization for texture', key, error); }
+			image_cache.set(key, image);
+			return image;
+		}
+
+		function cropTextureFace(image, uv) {
+			let x = Math.min(uv[0], uv[2]) * image.width / 16, y = Math.min(uv[1], uv[3]) * image.frame_height / 16;
+			let w = Math.abs(uv[2] - uv[0]) * image.width / 16, h = Math.abs(uv[3] - uv[1]) * image.frame_height / 16;
+			if (![x, y, w, h].every(Number.isInteger) || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > image.width || y + h > image.frame_height) return null;
+			let key = `${x},${y},${w},${h}`;
+			if (!image.crops) image.crops = new Map();
+			if (image.crops.has(key)) return image.crops.get(key);
+			let rgba = new Uint8Array(w * h * image.frames * 4);
+			for (let frame = 0; frame < image.frames; frame++) for (let row = 0; row < h; row++) {
+				let start = ((frame * image.frame_height + y + row) * image.width + x) * 4;
+				rgba.set(image.rgba.subarray(start, start + w * 4), (frame * h + row) * w * 4);
+			}
+			let cropped = {width: w, height: h * image.frames, frame_height: h, frames: image.frames, animation: image.animation, rgba, opaque: image.opaque};
+			image.crops.set(key, cropped); return cropped;
+		}
+
+		function fullCubeTemplate(state, options, image_cache) {
+			if (full_cube_cache.has(state)) return full_cube_cache.get(state);
+			full_cube_cache.set(state, null);
+			let refs = selectBlockModelRefs(state, options);
+			if (refs.length !== 1 || (refs[0].x || 0) % 90 || (refs[0].y || 0) % 90) return null;
+			let model = loadResolvedModel(refs[0].model, options);
+			if (!model?.elements?.length || model.elements.length > 8) return null;
+			let template = {model, ref: refs[0], components: [], max_span: 16, axes: [true, true, true], occludes: false};
+			for (let element of model.elements) {
+				if (element.rotation) return null;
+				let bounds = getElementBounds(element, refs[0], {x: 0, y: 0, z: 0}, [0, 0, 0]);
+				for (let key of ['from', 'to']) bounds[key] = bounds[key].map(v => Math.abs(v) < EPSILON ? 0 : Math.abs(v - 1) < EPSILON ? 1 : v);
+				if (bounds.from.some((v, a) => v < 0 || bounds.to[a] > 1 || bounds.to[a] <= v)) return null;
+				for (let a = 0; a < 3; a++) if (bounds.from[a] !== 0 || bounds.to[a] !== 1) template.axes[a] = false;
+				let component = {element, bounds, faces: {}, opaque: true};
+				for (let direction of FACE_DIRECTIONS) {
+					let face = element.faces?.[direction]; if (!face) return null;
+					let uv = face.uv || defaultJavaFaceUv(element, direction), resolved = resolveTextureReference(model, face.texture);
+					if (!resolved.link) return null;
+					let info = textureInfoFromLink(resolved.link, state, resolved.namespace);
+					if (resolved.force_translucent) info.force_translucent = true;
+					let tint = typeof face.tintindex === 'number' ? tintInfoForBlockFace(state, face.tintindex) : null;
+					if (tint) info.tint_rgb = tint.rgb;
+					let source = readTexturePixels(info, options, image_cache), image = source && cropTextureFace(source, uv);
+					if (!image || (!image.opaque && (!options.merge_transparent || face.cullface !== direction))) return null;
+					component.opaque = component.opaque && image.opaque;
+					template.max_span = Math.min(template.max_span, Math.floor(1024 / Math.max(image.width, image.frame_height)), Math.floor(4096 / (Math.max(image.width, image.frame_height) * image.frames)));
+					let output = rotateDirection(direction, refs[0]);
+					component.faces[output] = {info, image, uv, rotation: rotatedFaceUvRotation(direction, output, face, refs[0]), tint: face.tintindex};
+				}
+				template.components.push(component);
+			}
+			if (!template.axes.some(Boolean)) return null;
+			template.occludes = template.components.length === 1 && template.axes.every(Boolean) && template.components[0].opaque;
+			template.element = template.components[0].element; template.faces = template.components[0].faces;
+			full_cube_cache.set(state, template);
+			return template;
+		}
+
+		function effectiveGrouping(options) {
+			return options.grouping === 'auto' ? (isAnimatedJavaFormat() ? 'parts' : 'block') : options.grouping;
+		}
+
+		function animationPartForBlock(block, options) {
+			if (effectiveGrouping(options) !== 'parts') return -1;
+			return options.animation_parts.findIndex(part => [block.x, block.y, block.z].every((v, a) => v >= part.min[a] && v <= part.max[a]));
+		}
+
+		function chunkKey(block, options) {
+			return [block.x, block.y, block.z].map(v => Math.floor(v / options.chunk_size)).join('_').replace(/-/g, 'n');
+		}
+
+		function growFullCubeBox(block, candidates, consumed, options) {
+			let template = candidates.get(keyForBlock(block));
+			let size = [1, 1, 1];
+			let origin = [block.x, block.y, block.z];
+			let grouping = effectiveGrouping(options);
+			let part = animationPartForBlock(block, options);
+			for (let axis of [0, 2, 1]) {
+				if (!template.axes[axis]) continue;
+				while (size[axis] < template.max_span) {
+					let matches = true;
+					let end = origin[axis] + size[axis];
+					if (grouping === 'chunk' && Math.floor(end / options.chunk_size) !== Math.floor(origin[axis] / options.chunk_size)) break;
+					for (let a = 0; a < size[(axis + 1) % 3] && matches; a++) {
+						for (let b = 0; b < size[(axis + 2) % 3]; b++) {
+							let pos = origin.slice();
+							pos[axis] = end; pos[(axis + 1) % 3] += a; pos[(axis + 2) % 3] += b;
+							let key = pos.join(',');
+							if (consumed.has(key) || candidates.get(key) !== template || animationPartForBlock({x: pos[0], y: pos[1], z: pos[2]}, options) !== part) { matches = false; break; }
+						}
+					}
+					if (!matches) break;
+					size[axis]++;
+				}
+			}
+			return {block, size, template};
+		}
+
+		function tiledTexturePath(face, factor, options) {
+			let hash = face.image.hash || (face.image.hash = pngCrc32(face.image.rgba).toString(16));
+			let animation_hash = face.image.animation ? pngCrc32(new TextEncoder().encode(JSON.stringify(face.image.animation))).toString(16) : 'static';
+			return `${options.texture_folder}/cubizer/${cleanName(face.info.full_path || face.info.path).replace(/\//g, '_')}_${hash}_${face.image.width}x${face.image.frame_height}_${animation_hash}_${factor}`;
+		}
+
+		function tiledTexture(face, factor, options, texture_map, new_textures) {
+			let image = face.image;
+			let path = tiledTexturePath(face, factor, options);
+			let key = `tiled:${options.texture_namespace}:${path}`;
+			if (texture_map[key]) return texture_map[key];
+			let existing = Texture.all.find(t => t[IMPORTED_PROPERTY] && t.namespace === options.texture_namespace && t[TEXTURE_FULL_PATH_PROPERTY] === path);
+			if (existing) return texture_map[key] = existing;
+			let width = Math.max(image.width, image.frame_height) * factor;
+			let height = width * image.frames;
+			texture_map.__tiled_pixels = (texture_map.__tiled_pixels || 0) + width * height;
+			let rgba = new Uint8Array(width * height * 4);
+			for (let frame = 0; frame < image.frames; frame++) for (let y = 0; y < width; y++) {
+				let start = (frame * image.frame_height + y % image.frame_height) * image.width * 4;
+				let row = image.rgba.subarray(start, start + image.width * 4);
+				for (let x = 0; x < width; x += image.width) rgba.set(row.subarray(0, Math.min(image.width, width - x) * 4), ((frame * width + y) * width + x) * 4);
+			}
+			let texture = new Texture({id: uniqueTextureId(path), name: pathBasename(path) + '.png'});
+			texture.fromDataURL(toDataUrl(encodeRgbaPng(width, height, rgba), 'image/png'));
+			texture.namespace = options.texture_namespace;
+			texture.folder = `${options.texture_folder}/cubizer`;
+			texture.uv_width = texture.uv_height = 16;
+			texture[TEXTURE_FRAME_LAYOUT_PROPERTY] = {width, height: width, frames: image.frames}; attachTextureFrameLayout(texture);
+			primeTextureImage(texture, width, height);
+			if (face.info.force_translucent) texture.force_translucent = true;
+			if (image.animation) {
+				texture[TEXTURE_ANIMATION_PROPERTY] = {animation: {...image.animation, width, height: width}};
+				texture.frame_time = image.animation.frametime || 1; texture.frame_interpolate = !!image.animation.interpolate;
+				if (image.animation.frames) { texture.frame_order_type = 'custom'; texture.frame_order = image.animation.frames.map(f => typeof f === 'number' ? f : `${f.index}:${f.time || texture.frame_time}`).join(' '); }
+			}
+			texture[IMPORTED_PROPERTY] = true;
+			texture[TEXTURE_FULL_PATH_PROPERTY] = path;
+			texture.flags?.add(PLUGIN_ID);
+			// Generated tiles must be exported; unlike vanilla previews they are not in the game jar.
+			texture.saved = false;
+			texture.add(false, false);
+			new_textures.push(texture);
+			return texture_map[key] = texture;
+		}
+
+		function createMergedCube(box, options, offset, group, texture_map, new_textures, new_cubes) {
+			let {block, size, template} = box;
+			if (new_cubes.length + template.components.length > options.cube_limit) return false;
+			let factor = Math.min(template.max_span, 2 ** Math.ceil(Math.log2(Math.max(...size))));
+			let needed = new Map();
+			for (let component of template.components) for (let face of Object.values(component.faces)) {
+				let path = tiledTexturePath(face, factor, options);
+				let key = `tiled:${options.texture_namespace}:${path}`;
+				if (!texture_map[key] && !Texture.all.some(t => t[IMPORTED_PROPERTY] && t.namespace === options.texture_namespace && t[TEXTURE_FULL_PATH_PROPERTY] === path)) {
+					needed.set(key, Math.max(face.image.width, face.image.frame_height) ** 2 * face.image.frames * factor * factor);
+				}
+			}
+			if ((texture_map.__tiled_pixels || 0) + Array.from(needed.values()).reduce((a, b) => a + b, 0) > 16 * 1024 * 1024) {
+				texture_map.__merge_limited = true;
+				return false;
+			}
+			for (let component of template.components) {
+				let faces = {};
+				for (let direction of FACE_DIRECTIONS) {
+					let face = component.faces[direction], texture = tiledTexture(face, factor, options, texture_map, new_textures);
+					let axes = {north: [0, 1], south: [0, 1], east: [2, 1], west: [2, 1], up: [0, 2], down: [0, 2]}[direction];
+					if (face.rotation % 180) axes = axes.slice().reverse();
+					let side = Math.max(face.image.width, face.image.frame_height) * factor;
+					let w = size[axes[0]] * face.image.width * 16 / side, h = size[axes[1]] * face.image.frame_height * 16 / side;
+					let uv = [face.uv[0] < face.uv[2] ? 0 : w, face.uv[1] < face.uv[3] ? 0 : h, face.uv[2] < face.uv[0] ? 0 : w, face.uv[3] < face.uv[1] ? 0 : h];
+					faces[direction] = {texture: texture.uuid, uv: uvForProject(uv, 16, 16, texture), rotation: face.rotation};
+					if (typeof face.tint === 'number') faces[direction].tint = face.tint;
+					if (options.cull_faces) faces[direction].cullface = direction;
+				}
+				let from = [block.x, block.y, block.z].map((v, i) => (v + component.bounds.from[i] - offset[i]) * options.block_scale);
+				let to = [block.x, block.y, block.z].map((v, i) => (v + component.bounds.to[i] + size[i] - 1 - offset[i]) * options.block_scale);
+				let cube = initImportedCube(new Cube({name: `${blockGroupName(block)}_merged_${size.join('x')}`, box_uv: false, autouv: 0, from, to, origin: [0, 0, 0], faces, shade: component.element.shade !== false}), group);
+				cube[IMPORTED_PROPERTY] = true; new_cubes.push(cube);
+			}
+			return true;
 		}
 
 		function isLikelyFullCubeState(state) {
@@ -3631,8 +4353,8 @@
 			return {min, max};
 		}
 
-		function getImportOffset(blocks, options) {
-			let bounds = calculateBounds(blocks);
+		function getImportOffset(blocks, options, prepared_bounds) {
+			let bounds = prepared_bounds || calculateBounds(blocks);
 			if (options.center_model) {
 				return [
 					(bounds.min[0] + bounds.max[0]) / 2,
@@ -3647,7 +4369,8 @@
 		function visibleFacesForBlock(block, occupied, options) {
 			let faces = {};
 			FACE_DIRECTIONS.forEach(direction => {
-				faces[direction] = true;
+				let delta = DIRECTIONS[direction].delta;
+				faces[direction] = !options.visible_faces_only || !occupied.has(`${block.x + delta[0]},${block.y + delta[1]},${block.z + delta[2]}`);
 			});
 			return faces;
 		}
@@ -3661,7 +4384,7 @@
 		}
 
 		function createBlockGroup(block, root_group, new_groups) {
-			let group = new Group(blockGroupName(block)).addTo(root_group).init();
+			let group = uniqueImportGroup(blockGroupName(block), root_group);
 			group.isOpen = false;
 			group[IMPORTED_PROPERTY] = true;
 			new_groups.push(group);
@@ -3687,7 +4410,7 @@
 					return;
 				}
 				faces[direction] = {
-					uv: [0, 0, 16, 16],
+					uv: uvForProject([0, 0, 16, 16], 16, 16, texture),
 					texture: texture ? texture.uuid : false
 				};
 				if (options.cull_faces) faces[direction].cullface = direction;
@@ -3875,20 +4598,7 @@
 
 		function javaUvForTexture(uv, texture) {
 			uv = uv && uv.slice ? uv.slice() : [0, 0, 16, 16];
-			let project_width = Project?.texture_width || 16;
-			let project_height = Project?.texture_height || 16;
-			let texture_width = texture?.uv_width || project_width;
-			let texture_height = texture?.uv_height || project_height;
-			if (!texture_width || !texture_height ||
-				(texture_width === project_width && texture_height === project_height)) {
-				return uv;
-			}
-			return [
-				roundUv(uv[0] * project_width / texture_width),
-				roundUv(uv[1] * project_height / texture_height),
-				roundUv(uv[2] * project_width / texture_width),
-				roundUv(uv[3] * project_height / texture_height)
-			];
+			return uvForProject(uv, texture?.uv_width || 16, texture?.uv_height || 16, texture).map(roundUv);
 		}
 
 		function facingYaw(facing) {
@@ -4157,6 +4867,7 @@
 				}
 				let cube_data = {
 					name: `${spec.name || texturePathFromState(block.state)}_${new_cubes.length + 1}`,
+					box_uv: false,
 					autouv: 0,
 					from: bounds.from,
 					to: bounds.to,
@@ -4168,7 +4879,8 @@
 					cube_data.origin = [block.x + 0.5 - offset[0], block.y + 0.5 - offset[1], block.z + 0.5 - offset[2]];
 					cube_data.rotation = [0, spec.cube_rotation_y, 0];
 				}
-				let cube = new Cube(cube_data).addTo(root_group).init();
+				for (let key of ['from', 'to', 'origin']) cube_data[key] = cube_data[key].map(v => v * options.block_scale);
+				let cube = initImportedCube(new Cube(cube_data), root_group);
 				if (spec.cube_rotation_y) cube.rotation_axis = 'y';
 				cube[IMPORTED_PROPERTY] = true;
 				new_cubes.push(cube);
@@ -4292,16 +5004,17 @@
 				block.x - offset[0],
 				block.y - offset[1],
 				block.z - offset[2]
-			];
-			let to = [from[0] + 1, from[1] + 1, from[2] + 1];
-			let cube = new Cube({
+			].map(v => v * options.block_scale);
+			let to = from.map(v => v + options.block_scale);
+			let cube = initImportedCube(new Cube({
 				name: `${texturePathFromState(block.state)}_${index + 1}`,
+				box_uv: false,
 				autouv: 0,
 				from,
 				to,
 				origin: [0, 0, 0],
 				faces: cubeFaces(block.state, visible_faces, texture, options)
-			}).addTo(root_group).init();
+			}), root_group);
 			cube[IMPORTED_PROPERTY] = true;
 			new_cubes.push(cube);
 		}
@@ -4332,6 +5045,7 @@
 					let rotation_data = getElementRotation(element, ref, block, offset);
 					let cube_data = {
 						name: `${texturePathFromState(block.state)}_${new_cubes.length + 1}`,
+						box_uv: false,
 						autouv: 0,
 						from: bounds.from,
 						to: bounds.to,
@@ -4343,7 +5057,8 @@
 						cube_data.rotation = rotation_data.rotation;
 						cube_data.rescale = rotation_data.rescale;
 					}
-					let cube = new Cube(cube_data).addTo(root_group).init();
+					for (let key of ['from', 'to', 'origin']) cube_data[key] = cube_data[key].map(v => v * options.block_scale);
+					let cube = initImportedCube(new Cube(cube_data), root_group);
 					if (rotation_data) cube.rotation_axis = rotation_data.axis;
 					cube[IMPORTED_PROPERTY] = true;
 					new_cubes.push(cube);
@@ -4353,8 +5068,21 @@
 			return {used_model: created > 0 || hidden > 0 || truncated > 0, created, truncated, hidden};
 		}
 
-		function importBlocksIntoProject(structure, options) {
-			let source_blocks = structure.blocks.filter(block => !isAirState(block.state));
+		async function importBlocksIntoProject(structure, options, task) {
+			options = saveOptions(options);
+			await prepareTextureSource(options, task);
+			let unique_blocks = new Map();
+			let filtered = structure.filtered || 0;
+			for (let i = 0; !structure.prepared && i < structure.blocks.length; i++) {
+				if (i % 4096 === 0) await yieldImport(task, i, structure.blocks.length);
+				let block = structure.blocks[i];
+				if (isAirState(block.state)) continue;
+				if (!blockMatchesFilters(block, options)) { filtered++; continue; }
+				unique_blocks.set(keyForBlock(block), block);
+			}
+			let source_blocks = structure.prepared ? structure.blocks : Array.from(unique_blocks.values()).sort((a, b) => a.y - b.y || a.z - b.z || a.x - b.x);
+			let read_limited = source_blocks.length > options.source_block_limit || structure.read_limited;
+			if (source_blocks.length > options.source_block_limit) source_blocks.length = options.source_block_limit;
 			if (!source_blocks.length) {
 				Blockbench.showMessageBox({
 					title: translate('title'),
@@ -4364,23 +5092,11 @@
 				return null;
 			}
 
-			if (!Project) {
-				if (!options.create_project) {
-					Blockbench.showMessageBox({
-						title: translate('title'),
-						icon: 'info',
-						message: translate('message.no_project')
-					});
-					return null;
-				}
-				setupProject(Formats.java_block);
-				Project.name = pathStem(structure.name);
-			}
-
-			options = saveOptions(options);
-			Project.texture_width = 16;
-			Project.texture_height = 16;
-			Project.box_uv = false;
+			initializeImportProject(structure.name, options.create_project, options.project_format);
+			limitImportUV(source_blocks.length);
+			task.project = Project;
+			task.saved = Project.saved;
+			Project.locked = true;
 
 			let model_source_ok = true;
 			if (options.use_block_models) {
@@ -4388,35 +5104,97 @@
 				model_source_ok = !!readJsonAsset(context, 'assets/minecraft/blockstates/stone.json');
 			}
 
-			let occupied = new Set(source_blocks.map(keyForBlock));
-			let solid_occupied = new Set(source_blocks.filter(block => isLikelyFullCubeState(block.state)).map(keyForBlock));
-			let offset = getImportOffset(source_blocks, options);
+			let candidates = new Map();
+			let solid_occupied = new Set();
+			let image_cache = new Map();
+			if (options.merge_full_cubes || options.visible_faces_only) {
+				for (let i = 0; i < source_blocks.length; i++) {
+					if (i % 256 === 0) await yieldImport(task, i, source_blocks.length);
+					let block = source_blocks.at(i);
+					let template = fullCubeTemplate(block.state, options, image_cache);
+					if (template) {
+						let key = keyForBlock(block); candidates.set(key, template);
+						if (options.visible_faces_only && template.occludes) solid_occupied.add(key);
+					}
+				}
+			}
+			let offset = getImportOffset(source_blocks, options, structure.prepared ? structure.bounds : null);
 			let hidden = 0;
 			let truncated = 0;
 			let model_blocks = 0;
 			let fallback_blocks = 0;
 			let fallback_detail_map = {};
+			let merged_blocks = 0;
+			let consumed = new Set();
+			let chunk_groups = new Map();
+			let part_groups = new Map();
+			let grouping = effectiveGrouping(options);
+			let merged_remaining = 0;
 
 			let new_cubes = [];
 			let new_textures = [];
 			let new_groups = [];
 			let texture_map = {};
 			Undo.initEdit({elements: new_cubes, textures: new_textures, groups: new_groups, outliner: true});
+			task.undo = Undo;
 
-			let root_group = new Group(pathStem(structure.name)).init();
+			let root_group = uniqueImportGroup(pathStem(structure.name));
 			root_group.isOpen = true;
 			new_groups.push(root_group);
 
-			for (let block of source_blocks) {
+			for (let block_index = 0; block_index < source_blocks.length; block_index++) {
+				if (block_index % 32 === 0) await yieldImport(task, block_index, source_blocks.length);
+				let block = source_blocks.at(block_index);
+				if (consumed.has(keyForBlock(block))) { merged_remaining--; continue; }
+				let cube_start = new_cubes.length;
+				let truncated_before = truncated;
 				if (new_cubes.length >= options.cube_limit) {
-					truncated++;
-					continue;
+					truncated += source_blocks.length - block_index - merged_remaining;
+					break;
 				}
 
-				let block_group = createBlockGroup(block, root_group, new_groups);
+				if (options.visible_faces_only && candidates.get(keyForBlock(block))?.occludes && !hasAnyVisibleFace(visibleFacesForBlock(block, solid_occupied, options))) {
+					hidden++;
+					continue;
+				}
+				let block_group = root_group;
+				if (grouping === 'parts') {
+					let index = animationPartForBlock(block, options);
+					if (!part_groups.has(index)) {
+						let part = options.animation_parts[index];
+						let pivot = part ? part.pivot.map((v, a) => (v - offset[a]) * options.block_scale) : [0, 0, 0];
+						let group = uniqueImportGroup(part ? part.name : 'body', root_group, pivot);
+						new_groups.push(group); part_groups.set(index, group);
+					}
+					block_group = part_groups.get(index);
+				}
+				if (grouping === 'block') block_group = createBlockGroup(block, root_group, new_groups);
+				if (grouping === 'chunk') {
+					let key = chunkKey(block, options);
+					if (!chunk_groups.has(key)) {
+						let origin = [block.x, block.y, block.z].map((v, i) => (Math.floor(v / options.chunk_size) * options.chunk_size - offset[i]) * options.block_scale);
+						let group = uniqueImportGroup('chunk_' + key, root_group, origin);
+						new_groups.push(group);
+						chunk_groups.set(key, group);
+					}
+					block_group = chunk_groups.get(key);
+				}
 				let handled = false;
+				if (options.merge_full_cubes && candidates.has(keyForBlock(block))) {
+					let box = growFullCubeBox(block, candidates, consumed, options);
+					let volume = box.size.reduce((a, b) => a * b, 1);
+					if (volume > 1 && createMergedCube(box, options, offset, block_group, texture_map, new_textures, new_cubes)) {
+						for (let x = 0; x < box.size[0]; x++) for (let y = 0; y < box.size[1]; y++) for (let z = 0; z < box.size[2]; z++) {
+							consumed.add(`${block.x + x},${block.y + y},${block.z + z}`);
+						}
+						merged_blocks += (volume - 1) * box.template.components.length;
+						merged_remaining += volume - 1;
+						model_blocks += volume;
+						handled = true;
+					}
+				}
 
-				let builtin_result = createBuiltinBlockEntityCubesForBlock(block, options, offset, block_group, texture_map, new_textures, new_cubes, options.cube_limit);
+				let builtin_result = handled ? {} : createBuiltinBlockEntityCubesForBlock(block, options, offset, block_group, texture_map, new_textures, new_cubes, options.cube_limit);
 				if (builtin_result.used_model) {
 					model_blocks++;
 					truncated += builtin_result.truncated;
@@ -4436,14 +5214,14 @@
 					let model_result = createModelCubesForBlock(block, options, offset, solid_occupied, block_group, texture_map, new_textures, new_cubes, options.cube_limit);
 					if (model_result.used_model) {
 						model_blocks++;
-						hidden += model_result.created ? 0 : model_result.hidden;
+						hidden += !model_result.created && model_result.hidden ? 1 : 0;
 						truncated += model_result.truncated;
 						handled = true;
 					}
 				}
 
 				if (!handled) {
-					let visible_faces = visibleFacesForBlock(block, occupied, options);
+					let visible_faces = visibleFacesForBlock(block, solid_occupied, options);
 					if (!hasAnyVisibleFace(visible_faces)) {
 						hidden++;
 					} else {
@@ -4453,15 +5231,22 @@
 					}
 				}
 
-				removeEmptyBlockGroup(block_group, new_groups);
+				if (truncated > truncated_before) {
+					// A cube budget must not leave only part of a bed, chest, or multipart block.
+					let partial = new_cubes.splice(cube_start);
+					for (let cube of partial) cube.remove();
+					truncated = truncated_before + 1;
+					if (handled) model_blocks--;
+				}
+				if (grouping === 'block') removeEmptyBlockGroup(block_group, new_groups);
 			}
 
-			if (new_textures[0]) new_textures[0].enableParticle();
+			for (let group of chunk_groups.values()) removeEmptyBlockGroup(group, new_groups);
+			for (let group of part_groups.values()) removeEmptyBlockGroup(group, new_groups);
+			if (new_textures[0] && !Texture.all.some(texture => texture.particle)) new_textures[0].enableParticle();
+			await yieldImport(task, source_blocks.length, source_blocks.length);
 			Undo.finishEdit(translate('action.import'));
-			root_group.select();
-			Canvas.updateAll();
-			updateSelection();
-			Validator.validate();
+			updateImportedView(new_cubes, new_groups);
 			Project.saved = false;
 
 			return {
@@ -4475,7 +5260,12 @@
 				fallback_details: fallbackDetailsFromMap(fallback_detail_map),
 				cube_limit: options.cube_limit,
 				model_source_ok,
-				texture_source_path: options.texture_source_path || ''
+				texture_source_path: options.texture_source_path || '',
+				filtered, merged_blocks, read_limited: !!read_limited,
+				merge_limited: !!texture_map.__merge_limited,
+				groups: new_groups.length,
+				failed_chunks: structure.failed_chunks || 0,
+				bounds: structure.prepared ? structure.bounds : calculateBounds(source_blocks), block_scale: options.block_scale, offset
 			};
 		}
 
@@ -4520,11 +5310,384 @@
 			}
 			let fallback_details = formatFallbackDetails(stats.fallback_details);
 			if (fallback_details) message += '\n\n' + fallback_details;
+			message += '\n\n' + translate('message.optimization_summary', [stats.filtered || 0, stats.merged_blocks || 0, stats.groups || 0]);
+			if (stats.read_limited) message += '\n\n' + translate('message.read_limited');
+			if (stats.merge_limited) message += '\n\n' + translate('message.merge_limited');
+			if (stats.failed_chunks) message += '\n\n' + translate('message.failed_chunks', [stats.failed_chunks]);
+			if (Format.id === 'java_block' && stats.bounds) {
+				let offset = stats.offset;
+				let bounds = {min: stats.bounds.min.map((v, i) => (v - offset[i]) * stats.block_scale), max: stats.bounds.max.map((v, i) => (v - offset[i]) * stats.block_scale)};
+				if (exceedsJavaCoordinateRange(bounds)) message += '\n\n' + translate('message.java_bounds');
+			}
 			Blockbench.showMessageBox({
 				title: translate('title'),
 				icon: 'view_in_ar',
 				width: 640,
 				message
+			});
+		}
+
+		async function decompressWorkerBytes(bytes, format) {
+			let stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream(format));
+			return new Uint8Array(await new Response(stream).arrayBuffer());
+		}
+
+		function packedStateAt(longs, index, bits, padded) {
+			if (!longs?.length) return 0;
+			let bit = padded ? (index % Math.floor(64 / bits)) * bits : index * bits;
+			let word_index = padded ? Math.floor(index / Math.floor(64 / bits)) : Math.floor(bit / 64);
+			let shift = bit % 64;
+			let value = longAsUnsigned(longs[word_index] || 0) >> BigInt(shift);
+			if (!padded && shift + bits > 64) value |= longAsUnsigned(longs[word_index + 1] || 0) << BigInt(64 - shift);
+			return Number(value & ((1n << BigInt(bits)) - 1n));
+		}
+
+		function workerSourceInfo(source) {
+			if (source.extension === 'mca') {
+				let match = source.name.match(/r\.(-?\d+)\.(-?\d+)\.mca$/i);
+				let x = Number(match?.[1] || 0) * 512, z = Number(match?.[2] || 0) * 512;
+				return {format: 'Anvil Region MCA', bounds: {min: [x, -64, z], max: [x + 512, 320, z + 512]}};
+			}
+			let nbt = source.root.value?.Schematic || source.root.value;
+			if (nbt.Regions || nbt.regions) {
+				let corners = [];
+				for (let r of Object.values(nbt.Regions || nbt.regions)) {
+					let p = vectorFrom(r.Position || r.position), s = vectorFrom(r.Size || r.size);
+					corners.push({x: p[0], y: p[1], z: p[2]}, {x: p[0] + s[0] - Math.sign(s[0]), y: p[1] + s[1] - Math.sign(s[1]), z: p[2] + s[2] - Math.sign(s[2])});
+				}
+				return {format: 'Litematica', bounds: calculateBounds(corners)};
+			}
+			let size = nbt.size ? vectorFrom(nbt.size) : [toNumber(nbt.Width), toNumber(nbt.Height), toNumber(nbt.Length)];
+			let format = nbt.size ? 'Structure NBT' : (nbt.Palette || nbt.Blocks?.Palette ? 'Sponge Schematic' : 'Classic Schematic');
+			return {format, bounds: {min: [0, 0, 0], max: size}};
+		}
+
+		function* denseWorkerBlocks(size, position, options, read_state) {
+			let min = size.map((_, i) => options.filter_bounds ? Math.max(0, options.bounds_min[i] - position[i]) : 0);
+			let max = size.map((v, i) => options.filter_bounds ? Math.min(v - 1, options.bounds_max[i] - position[i]) : v - 1);
+			for (let y = min[1]; y <= max[1]; y++) for (let z = min[2]; z <= max[2]; z++) for (let x = min[0]; x <= max[0]; x++) {
+				let state = read_state((y * size[2] + z) * size[0] + x);
+				if (!isAirState(state)) yield {x: x + position[0], y: y + position[1], z: z + position[2], state};
+			}
+		}
+
+		async function* iterateWorkerBlocks(source, options) {
+			if (source.extension === 'mca') {
+				let bytes = source.bytes, info = workerSourceInfo(source);
+				source.failed_chunks = 0;
+				for (let index = 0; index < 1024; index++) {
+					let cx = info.bounds.min[0] / 16 + (index & 31), cz = info.bounds.min[2] / 16 + (index >> 5);
+					if (options.filter_bounds && (cx * 16 > options.bounds_max[0] || cx * 16 + 15 < options.bounds_min[0] || cz * 16 > options.bounds_max[2] || cz * 16 + 15 < options.bounds_min[2])) continue;
+					let offset = index * 4, sector = (bytes[offset] << 16) | (bytes[offset + 1] << 8) | bytes[offset + 2], sectors = bytes[offset + 3];
+					if (!sector || !sectors) continue;
+					try {
+						let root = source.chunks.get(index);
+						if (!root) {
+							let start = sector * 4096, length = readInt32BE(bytes, start), type = bytes[start + 4];
+							if (length <= 1 || start + 4 + length > bytes.length || length + 4 > sectors * 4096) throw new Error('Invalid MCA sector');
+							let raw = bytes.subarray(start + 5, start + 4 + length);
+							if (type === 1 || type === 2) raw = await decompressWorkerBytes(raw, type === 1 ? 'gzip' : 'deflate');
+							else if (type !== 3) throw new Error(`Unsupported MCA compression ${type}`);
+							root = parseNbt(raw);
+							if (source.chunks.size >= 16) source.chunks.delete(source.chunks.keys().next().value);
+							source.chunks.set(index, root);
+						}
+						let blocks = [];
+						extractChunkBlocks(root, cx, cz, blocks, Infinity, options);
+						for (let block of blocks) yield block;
+					} catch (error) { source.failed_chunks++; }
+				}
+				return;
+			}
+			let nbt = source.root.value?.Schematic || source.root.value;
+			if (nbt.Regions || nbt.regions) {
+				for (let region of Object.values(nbt.Regions || nbt.regions)) {
+					let signed = vectorFrom(region.Size || region.size), size = signed.map(Math.abs);
+					let p = vectorFrom(region.Position || region.position).map((v, i) => v + Math.min(0, signed[i] + 1));
+					let palette = (region.BlockStatePalette || region.blockStatePalette || []).map(blockStateFromPaletteEntry);
+					let longs = region.BlockStates || region.blockStates || [], bits = Math.max(2, Math.ceil(Math.log2(Math.max(1, palette.length))));
+					yield* denseWorkerBlocks(size, p, options, i => palette[packedStateAt(longs, i, bits, false)] || 'minecraft:air');
+				}
+				return;
+			}
+			if (nbt.size && (nbt.palette || nbt.palettes)) {
+				let palette = (nbt.palette || nbt.palettes[0]).map(blockStateFromPaletteEntry);
+				for (let entry of nbt.blocks || []) {
+					let p = vectorFrom(entry.pos), state = palette[entry.state] || 'minecraft:air';
+					if (!isAirState(state)) yield {x: p[0], y: p[1], z: p[2], state};
+				}
+				return;
+			}
+			let size = [toNumber(nbt.Width), toNumber(nbt.Height), toNumber(nbt.Length)];
+			let tag = nbt.Blocks || {}, palette = nbt.Palette || tag.Palette;
+			if (palette) {
+				let reverse = [], data = nbt.BlockData || tag.Data;
+				Object.keys(palette).forEach(state => reverse[palette[state]] = normalizeBlockName(state));
+				if (!data) throw new Error('Missing schematic block data');
+				let cursor = 0, volume = size.reduce((a, b) => a * b, 1);
+				for (let i = 0; i < volume; i++) {
+					let value = 0, shift = 0, byte;
+					do { if (cursor >= data.length || shift > 28) throw new Error('Invalid schematic VarInt'); byte = data[cursor++]; value |= (byte & 127) << shift; shift += 7; } while (byte & 128);
+					let state = reverse[value] || 'minecraft:air';
+					if (!isAirState(state)) yield {x: i % size[0], y: Math.floor(i / (size[0] * size[2])), z: Math.floor(i / size[0]) % size[2], state};
+				}
+			} else {
+				if (!nbt.Blocks || !size.every(v => v > 0)) throw new Error('Unsupported NBT structure');
+				yield* denseWorkerBlocks(size, [0, 0, 0], options, i => legacyBlockName((nbt.Blocks[i] & 255) | (getNibble(nbt.AddBlocks, i) << 8), nbt.Data?.[i] & 15));
+			}
+		}
+
+		async function scanWorkerSource(source, options, preview, progress) {
+			let unique = new Map(), cells = new Map(), cell_size = 1, filtered = 0, count = 0, read_limited = false;
+			let min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+			function addCell(cell) {
+				let key = [cell.x, cell.y, cell.z].map(v => Math.floor(v / cell_size)).join(',');
+				let previous = cells.get(key);
+				if (previous) previous.count += cell.count;
+				else cells.set(key, cell);
+			}
+			for await (let block of iterateWorkerBlocks(source, options)) {
+				if (!blockMatchesFilters(block, options)) { filtered++; continue; }
+				count++;
+				for (let a = 0; a < 3; a++) { let v = [block.x, block.y, block.z][a]; min[a] = Math.min(min[a], v); max[a] = Math.max(max[a], v + 1); }
+				if (preview) {
+					addCell({...block, count: 1});
+					while (cells.size > 2048) { cell_size *= 2; let old = Array.from(cells.values()); cells.clear(); old.forEach(addCell); }
+				} else {
+					unique.set(keyForBlock(block), block);
+					if (unique.size > options.source_block_limit) { unique.delete(keyForBlock(block)); read_limited = true; break; }
+				}
+				if (count % 32768 === 0) progress(count);
+			}
+			let info = workerSourceInfo(source), bounds = count ? {min, max} : info.bounds;
+			if (preview) return {name: source.name, ...info, bounds, count, cells: Array.from(cells.values()), cell_size, filtered, failed_chunks: source.failed_chunks || 0};
+			let blocks = Array.from(unique.values()).sort((a, b) => a.y - b.y || a.z - b.z || a.x - b.x);
+			let palette = [], ids = new Map(), packed = new Int32Array(blocks.length * 4);
+			blocks.forEach((block, i) => {
+				if (!ids.has(block.state)) { ids.set(block.state, palette.length); palette.push(block.state); }
+				packed.set([block.x, block.y, block.z, ids.get(block.state)], i * 4);
+			});
+			return {name: source.name, ...info, bounds: calculateBounds(blocks), palette, packed, filtered, read_limited, failed_chunks: source.failed_chunks || 0};
+		}
+
+		function structureWorkerMain() {
+			let source;
+			self.onmessage = async ({data}) => {
+				let {id, command, options} = data;
+				try {
+					if (command === 'open') {
+						let bytes = new Uint8Array(data.buffer);
+						source = {name: data.name, extension: data.extension, bytes, chunks: new Map()};
+						if (source.extension !== 'mca') {
+							self.postMessage({id, phase: 'decompress'});
+							if (bytes[0] === 31 && bytes[1] === 139) bytes = await decompressWorkerBytes(bytes, 'gzip');
+							else if (bytes[0] !== 10) bytes = await decompressWorkerBytes(bytes, 'deflate');
+							self.postMessage({id, phase: 'parse'});
+							source.root = parseNbt(bytes);
+							source.bytes = null;
+						} else if (bytes.length < 8192) throw new Error('Invalid MCA header');
+						self.postMessage({id, result: workerSourceInfo(source)});
+					} else {
+						if (!source) throw new Error('No structure loaded');
+						self.postMessage({id, phase: 'scan'});
+						let result = await scanWorkerSource(source, options, command === 'preview', current => self.postMessage({id, current}));
+						self.postMessage({id, result}, result.packed ? [result.packed.buffer] : []);
+					}
+				} catch (error) { self.postMessage({id, error: error.message}); }
+			};
+		}
+
+		function getStructureWorkerSource() {
+			let functions = [toUint8Array, decodeUtf8, toNumber, vectorFrom, normalizeBlockName, stringifyBlockState, blockStateFromPaletteEntry,
+				blockNameFromState, blockIdFromState, isAirState, legacyBlockName, getNibble, longAsUnsigned, decodePackedPadded, decodePackedCompact,
+				decodePackedStates, keyForBlock, blockMatchesFilters, calculateBounds, readInt32BE, NbtReader, parseNbt, extractLegacySectionBlocks,
+				extractPaletteSectionBlocks, extractChunkBlocks, decompressWorkerBytes, packedStateAt, workerSourceInfo, denseWorkerBlocks,
+				iterateWorkerBlocks, scanWorkerSource, structureWorkerMain];
+			return `'use strict';\nconst COLOR_NAMES=${JSON.stringify(COLOR_NAMES)}, LEGACY_BLOCKS=${JSON.stringify(LEGACY_BLOCKS)};\nconst AIR_BLOCKS=new Set(${JSON.stringify(Array.from(AIR_BLOCKS))});const filter_cache=new Map();\n`
+				+ functions.map(fn => fn.toString()).join('\n') + '\nstructureWorkerMain();';
+		}
+
+		function createStructureWorkerSession(on_progress) {
+			if (typeof Worker === 'undefined' || typeof DecompressionStream === 'undefined') throw new Error(translate('message.worker_unavailable'));
+			let url = URL.createObjectURL(new Blob([getStructureWorkerSource()], {type: 'text/javascript'}));
+			let worker;
+			try { worker = new Worker(url); } finally { URL.revokeObjectURL(url); }
+			let pending = new Map(), next_id = 0, closed = false;
+			worker.onmessage = ({data}) => {
+				let request = pending.get(data.id);
+				if (!request) return;
+				if (data.phase || data.current !== undefined) { on_progress?.(data); return; }
+				pending.delete(data.id);
+				if (data.error) request.reject(new Error(data.error)); else request.resolve(data.result);
+			};
+			worker.onerror = event => { closed = true; worker.terminate(); for (let request of pending.values()) request.reject(new Error(event.message || 'Structure worker failed')); pending.clear(); };
+			return {
+				setProgress(callback) { on_progress = callback; },
+				request(command, payload = {}, transfer = []) {
+					if (closed) return Promise.reject(Object.assign(new Error(translate('message.import_cancelled')), {import_cancelled: true}));
+					return new Promise((resolve, reject) => { let id = ++next_id; pending.set(id, {resolve, reject}); worker.postMessage({id, command, ...payload}, transfer); });
+				},
+				dispose() {
+					closed = true; worker.terminate();
+					for (let request of pending.values()) request.reject(Object.assign(new Error(translate('message.import_cancelled')), {import_cancelled: true}));
+					pending.clear();
+				}
+			};
+		}
+
+		function unpackWorkerStructure(result) {
+			let {packed, palette} = result;
+			let blocks = {
+				length: packed.length / 4,
+				at(i) { let offset = i * 4; return {x: packed[offset], y: packed[offset + 1], z: packed[offset + 2], state: palette[packed[offset + 3]]}; },
+				forEach(callback) { for (let i = 0; i < this.length; i++) callback(this.at(i), i); }
+			};
+			return {...result, blocks, prepared: true};
+		}
+
+		async function openStructureWorker(file, session) {
+			let bytes;
+			if (file.content || file.contents) bytes = toUint8Array(file.content || file.contents);
+			else {
+				let fs = getNativeModule('fs', {scope: file.path});
+				if (!fs?.readFile) throw new Error('Cannot read structure file');
+				bytes = toUint8Array(await new Promise((resolve, reject) => fs.readFile(file.path, (error, data) => error ? reject(error) : resolve(data))));
+			}
+			let buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+			return session.request('open', {buffer, extension: extensionFromFile(file), name: file.name || pathBasename(file.path)}, [buffer]);
+		}
+
+		function disposeStructurePreview(vue) {
+			let preview = vue?._structure_preview;
+			if (!preview) return;
+			preview.dispose_controls?.(); preview.observer?.disconnect();
+			preview.scene.traverse(object => { object.geometry?.dispose(); if (object.material) object.material.dispose(); });
+			preview.renderer.dispose(); preview.renderer.forceContextLoss();
+			preview.renderer.domElement.remove(); delete vue._structure_preview;
+		}
+
+		function renderStructurePreview(vue, data) {
+			disposeStructurePreview(vue);
+			let container = vue.$refs.scene, scene = new THREE.Scene(), width = container.clientWidth || 740, height = 260;
+			let renderer = new THREE.WebGLRenderer({alpha: true, antialias: true}); renderer.setSize(width, height); container.appendChild(renderer.domElement);
+			let camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 100000);
+			let extent = data.bounds.max.map((v, a) => v - data.bounds.min[a]), radius = Math.max(1, Math.hypot(...extent) / 2 + data.cell_size);
+			let target = new THREE.Vector3(...extent.map(v => v / 2));
+			camera.position.copy(target).add(new THREE.Vector3(1, 0.8, 1));
+			function fitCamera() {
+				let angle = Math.atan(Math.tan(Math.PI / 8) * Math.min(1, camera.aspect)), distance = radius / Math.sin(angle) * 1.08;
+				camera.position.sub(target).normalize().multiplyScalar(distance).add(target); camera.far = Math.max(100000, distance + radius * 4);
+				camera.lookAt(target); camera.updateProjectionMatrix();
+			}
+			fitCamera();
+			scene.add(new THREE.AmbientLight(0xffffff, 0.65)); let light = new THREE.DirectionalLight(0xffffff, 0.9); light.position.set(1, 2, 1); scene.add(light);
+			let geometry = new THREE.BoxGeometry(1, 1, 1), material = new THREE.MeshLambertMaterial({color: 0xffffff});
+			let mesh = new THREE.InstancedMesh(geometry, material, data.cells.length), transform = new THREE.Object3D();
+			let color = new THREE.Color();
+			data.cells.forEach((cell, i) => {
+				transform.position.set(...[cell.x, cell.y, cell.z].map((v, a) => Math.floor(v / data.cell_size) * data.cell_size + data.cell_size / 2 - data.bounds.min[a]));
+				transform.scale.setScalar(data.cell_size); transform.updateMatrix(); mesh.setMatrixAt(i, transform.matrix);
+				let hash = 0; for (let c of cell.state) hash = (hash * 31 + c.charCodeAt(0)) >>> 0;
+				color.setHSL((hash % 360) / 360, 0.32, 0.52); mesh.setColorAt(i, color);
+			});
+			mesh.instanceMatrix.needsUpdate = true; scene.add(mesh);
+			let render = () => renderer.render(scene, camera), controls, dispose_controls;
+			if (typeof Preview !== 'undefined' && Preview.selected?.controls) {
+				// Some native OrbitControls versions throw before removing their global key listener.
+				let listeners = [], targets = [renderer.domElement, window];
+				let methods = targets.map(target => ({target, own: Object.getOwnPropertyDescriptor(target, 'addEventListener'), add: target.addEventListener}));
+				try {
+					for (let entry of methods) entry.target.addEventListener = function(type, handler, options) { listeners.push([this, type, handler, options]); return entry.add.call(this, type, handler, options); };
+					controls = new Preview.selected.controls.constructor(camera, {id: 'cubizer_structure_preview', canvas: renderer.domElement, angle: null});
+				} finally {
+					for (let entry of methods) { if (entry.own) Object.defineProperty(entry.target, 'addEventListener', entry.own); else delete entry.target.addEventListener; }
+				}
+				dispose_controls = () => {
+					controls.stopMovement?.();
+					try { controls.dispose(); } catch (error) { if (!String(error).includes('onContextMenu')) console.warn(error); }
+					for (let [target, type, handler, options] of listeners) target.removeEventListener(type, handler, options);
+					controls.enabled = false;
+				};
+				controls.target.copy(target); controls.enableDamping = false; controls.addEventListener('change', render); controls.update();
+			}
+			let observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => {
+				let width = container.clientWidth || 740; renderer.setSize(width, height); camera.aspect = width / height; fitCamera(); controls?.update(); render();
+			}) : null;
+			observer?.observe(container); vue._structure_preview = {scene, renderer, controls, dispose_controls, observer}; render();
+		}
+
+		async function showStructurePreview(file, options) {
+			let dialog, session;
+			let record = {};
+			try {
+				session = createStructureWorkerSession(data => { if (dialog?.content_vue) dialog.content_vue.status = data.phase ? translate('phase.' + data.phase) : String(data.current); });
+				let fields = createOptionsForm(options), form = {};
+				for (let key of ['filter_bounds', 'bounds_min', 'bounds_max', 'include_blocks', 'exclude_blocks', 'grouping', 'block_scale']) form[key] = fields[key];
+				async function refresh() {
+					let vue = dialog.content_vue; if (vue.busy) return;
+					vue.busy = true; vue.error = '';
+					try {
+						let result = await session.request('preview', {options: sanitizeOptions({...options, ...dialog.getFormResult()})});
+						vue.preview_data = result; vue.status = translate('message.preview_stats', [result.count, result.cells.length]); renderStructurePreview(vue, result);
+					} catch (error) { if (!error.import_cancelled) vue.error = error.message; }
+					finally { vue.busy = false; }
+				}
+				dialog = new Dialog({
+					id: `${PLUGIN_ID}_structure_preview`, title: translate('dialog.preview'), width: 820, form,
+					buttons: [translate('button.import_selection'), tl('dialog.cancel')],
+					component: {
+						data() { return {busy: true, status: translate('phase.parse'), error: '', preview_data: null, parts: options.animation_parts.map(part => ({...part, pivot: part.pivot.slice()})), labels: {refresh: translate('button.refresh_preview'), parts: translate('form.animation_parts'), add: translate('button.add_part'), remove: tl('action.delete')}, axes: ['X', 'Y', 'Z']}; },
+						methods: {
+							refresh,
+							addPart() {
+								let values = dialog.getFormResult(); let bounds = this.preview_data?.bounds;
+								let min = values.filter_bounds ? values.bounds_min.slice() : bounds?.min.slice();
+								let max = values.filter_bounds ? values.bounds_max.slice() : bounds?.max.map(v => v - 1);
+								if (!min || !max) return;
+								this.parts.push({name: 'part_' + (this.parts.length + 1), min, max, pivot: min.map((v, a) => (v + max[a] + 1) / 2)});
+							}
+						},
+						template: `<div>
+							<div style="display:flex;align-items:center;gap:8px"><span style="flex:1">{{status}}</span><button @click="refresh" :disabled="busy" :title="labels.refresh"><i class="material-icons">refresh</i></button></div>
+							<p v-if="error" class="warning">{{error}}</p><div ref="scene" style="height:260px;width:100%;overflow:hidden;background:var(--color-back)"></div>
+							<div style="display:flex;align-items:center;gap:8px;margin-top:8px"><span style="flex:1">{{labels.parts}}</span><button @click="addPart" :disabled="busy || !preview_data" :title="labels.add"><i class="material-icons">add</i></button></div>
+							<div v-for="(part,i) in parts" :key="i" style="display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;margin-top:8px">
+								<input v-model="part.name" style="width:100%;min-width:0"/>
+								<button @click="parts.splice(i,1)" :title="labels.remove"><i class="material-icons">delete</i></button>
+								<span style="grid-column:1/-1;overflow-wrap:anywhere">{{part.min.join(', ')}} / {{part.max.join(', ')}}</span>
+								<div style="grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px"><label v-for="(axis,a) in axes" :key="axis">{{axis}} <input type="number" v-model.number="part.pivot[a]" style="width:64px"/></label></div>
+							</div>
+						</div>`
+					},
+					onConfirm(values) {
+						if (this.content_vue.busy || this.content_vue.error) return false;
+						let parts = this.content_vue.parts;
+						let selected = sanitizeOptions({...options, ...values, animation_parts: parts, grouping: parts.length ? 'parts' : values.grouping});
+						preview_sessions.delete(record);
+						disposeStructurePreview(this.content_vue); this.hide();
+						importMinecraftStructure(file, selected, session); return false;
+					},
+					onCancel() { session.dispose(); disposeStructurePreview(this.content_vue); preview_sessions.delete(record); }
+				}).show();
+				record.session = session; record.dialog = dialog; preview_sessions.add(record);
+				await openStructureWorker(file, session); dialog.content_vue.busy = false; await refresh();
+			} catch (error) {
+				session?.dispose();
+				if (!error.import_cancelled) {
+					if (dialog?.content_vue) { dialog.content_vue.busy = false; dialog.content_vue.error = error.message; }
+					else Blockbench.showMessageBox({title: translate('dialog.preview'), icon: 'error', message: error.message});
+				}
+			}
+		}
+
+		function disposePreviewSessions() {
+			for (let record of preview_sessions) { record.session.dispose(); disposeStructurePreview(record.dialog.content_vue); record.dialog.hide(); }
+			preview_sessions.clear();
+		}
+
+		function pickStructurePreview() {
+			Blockbench.import({resource_id: 'minecraft_structure', type: 'Minecraft Structure', extensions: ['schematic', 'schem', 'litematic', 'nbt', 'mca'], readtype: 'none', multiple: false}, files => {
+				if (files?.[0]) showStructurePreview(files[0], sanitizeOptions(importer_options));
 			});
 		}
 
@@ -4534,23 +5697,31 @@
 			return match ? match[1].toLowerCase() : '';
 		}
 
-		function importMinecraftStructure(file, options) {
+		async function importMinecraftStructure(file, options, session) {
+			let task;
+			let failed = true;
 			try {
-				let buffer = readFileBuffer(file);
-				let extension = extensionFromFile(file);
-				let source_name = file.name || pathBasename(file.path) || 'minecraft_structure';
-				let structure;
+				task = beginImportTask();
+				await yieldImport(task, 0, 1);
+				task.worker_session = session || createStructureWorkerSession();
+				task.worker_session.setProgress(data => {
+					if (task.dialog.content_vue) task.dialog.content_vue.status = data.phase ? translate('phase.' + data.phase) : String(data.current);
+				});
+				if (!session) await openStructureWorker(file, task.worker_session);
+				let structure = unpackWorkerStructure(await task.worker_session.request('select', {options}));
+				task.worker_session.dispose();
+				await yieldImport(task, 0, structure.blocks.length);
 
-				if (extension === 'mca') {
-					structure = parseAnvilRegion(buffer, source_name, options);
-				} else {
-					let root = parseNbtMaybeCompressed(buffer);
-					structure = parseNbtStructure(root, source_name, extension);
-				}
-
-				let stats = importBlocksIntoProject(structure, options);
+				let stats = await importBlocksIntoProject(structure, options, task);
+				failed = false;
+				endImportTask(task, false);
 				showImportSummary(structure, stats);
 			} catch (error) {
+				endImportTask(task, failed);
+				if (error.import_cancelled) {
+					Blockbench.showQuickMessage(error.message, 2500);
+					return;
+				}
 				console.error(error);
 				Blockbench.showMessageBox({
 					title: translate('title'),
@@ -4558,6 +5729,9 @@
 					width: 560,
 					message: translate('message.import_failed', [error?.message || error])
 				});
+			} finally {
+				endImportTask(task, failed);
+				full_cube_cache.clear();
 			}
 		}
 
@@ -4567,9 +5741,15 @@
 				id: `${PLUGIN_ID}_direct_import`,
 				title: translate('dialog.import_title'),
 				width: 520,
+				buttons: [translate('button.import_selection'), translate('button.preview'), tl('dialog.cancel')], cancelIndex: 2,
 				form: createOptionsForm(options),
+				onButton(index) {
+					if (index === 1) { let form = this.getFormResult(); this.hide(); showStructurePreview(file, sanitizeOptions({...options, ...form})); return false; }
+				},
 				onConfirm(form) {
+					this.hide();
 					importMinecraftStructure(file, sanitizeOptions(Object.assign({}, options, form)));
+					return false;
 				}
 			}).show();
 		}
@@ -4583,7 +5763,7 @@
 				resource_id: 'minecraft_structure',
 				type: 'Minecraft Structure',
 				extensions: ['schematic', 'schem', 'litematic', 'nbt', 'mca'],
-				readtype: 'binary',
+				readtype: 'none',
 				multiple: false
 			}, files => {
 				if (files && files[0]) showImportDialog(files[0]);
@@ -4688,12 +5868,12 @@
 				}
 
 				for (let key in event.model.textures) {
-					if (key === texture.id || event.model.textures[key] === texture.javaTextureLink()) {
-						event.model.textures[key] = link;
+					if (key === texture.id || compiledTextureLink(event.model.textures[key]) === texture.javaTextureLink()) {
+						setCompiledTextureLink(event.model.textures, key, link);
 					}
 				}
-				if (texture.particle && event.model.textures.particle === texture.javaTextureLink()) {
-					event.model.textures.particle = link;
+				if (texture.particle && compiledTextureLink(event.model.textures.particle) === texture.javaTextureLink()) {
+					setCompiledTextureLink(event.model.textures, 'particle', link);
 				}
 			});
 		}
@@ -4730,6 +5910,8 @@
 			addTranslations,
 			loadStoredOptions,
 			pickMinecraftStructure,
+			pickStructurePreview,
+			disposePreviewSessions,
 			showSettingsDialog,
 			pickTextureSource,
 			patchJavaTextureNamespaces,
@@ -4983,6 +6165,36 @@
 		});
 	}
 
+	function createAnimationPartFromSelection() {
+		let cubes = Cube.selected.filter(isCubizerCube);
+		if (!cubes.length || active_import) return;
+		for (let cube of cubes) {
+			for (let parent = cube.parent; parent instanceof Group; parent = parent.parent) {
+				if (parent.rotation?.some(value => Math.abs(value) > EPSILON)) {
+					Blockbench.showMessageBox({title: translate('action.animation_part'), icon: 'warning', message: translate('message.part_rotated_parent')}); return;
+				}
+			}
+		}
+		let min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+		for (let cube of cubes) for (let a = 0; a < 3; a++) { min[a] = Math.min(min[a], cube.from[a]); max[a] = Math.max(max[a], cube.to[a]); }
+		new Dialog({
+			id: `${PLUGIN_ID}_animation_part`, title: translate('action.animation_part'), width: 440,
+			form: {name: {label: tl('generic.name'), type: 'text', value: 'part'}, pivot: {label: translate('form.part_pivot'), type: 'vector', dimensions: 3, value: min.map((v, a) => (v + max[a]) / 2)}},
+			onConfirm(form) {
+				let groups = []; Undo.initEdit({elements: cubes, groups, outliner: true});
+				try {
+					let parent = cubes[0].parent;
+					while (parent instanceof Group && !cubes.every(cube => {
+						for (let p = cube.parent; p instanceof Group; p = p.parent) if (p === parent) return true;
+						return false;
+					})) parent = parent.parent;
+					let group = uniqueImportGroup(cleanName(form.name), parent instanceof Group ? parent : null, form.pivot); groups.push(group);
+					cubes.forEach(cube => cube.addTo(group)); Undo.finishEdit(translate('action.animation_part')); updateImportedView(cubes, groups);
+				} catch (error) { Undo.cancelEdit(true); throw error; }
+			}
+		}).show();
+	}
+
 	function createPluginMenu() {
 		let MenuClass = typeof BarMenu !== 'undefined' ? BarMenu : (typeof Blockbench !== 'undefined' && Blockbench.BarMenu);
 		if (!MenuClass || typeof MenuBar === 'undefined') return;
@@ -4992,6 +6204,9 @@
 		plugin_menu = new MenuClass(MENU_ID, [
 			import_action,
 			direct_import_action,
+			preview_action,
+			animation_part_action,
+			performance_action,
 			'_',
 			settings_action,
 			direct_settings_action,
@@ -5100,6 +6315,8 @@
 	}
 
 	function ensurePersistentPluginFiles(current_plugin) {
+		let known_path = normalizePluginPath(current_plugin?.path);
+		if (persistence_cache && [persistence_cache.source, persistence_cache.target].includes(known_path)) return persistence_cache.target;
 		let target_path = normalizePluginPath(defaultPersistentPluginPath());
 		if (!target_path) return '';
 		let path_module = getNativeModule('path');
@@ -5129,7 +6346,9 @@
 			]);
 			copyPluginFile(fs, source_file, target_file);
 		});
-		return fileExistsSync(target_path) ? target_path : current_path;
+		let result = fileExistsSync(target_path) ? target_path : current_path;
+		persistence_cache = {source: current_path, target: result};
+		return result;
 	}
 
 	function normalizePluginPath(file_path) {
@@ -5223,7 +6442,10 @@
 				current_plugin.source = 'file';
 				current_plugin.has_changelog = true;
 				current_plugin.new_repository_format = true;
-				refreshPluginPageText(current_plugin, persistent_path);
+				if (!page_text_loaded) {
+					refreshPluginPageText(current_plugin, persistent_path);
+					page_text_loaded = true;
+				}
 			}
 			let state_entry = state_list ? state_list.find(plugin => plugin && plugin.id === PLUGIN_ID) : null;
 			let installed_entry = installed.find(plugin => plugin && plugin.id === PLUGIN_ID);
@@ -5248,19 +6470,77 @@
 		}
 	}
 
+	function addOptimizationTranslations() {
+		if (typeof Language === 'undefined' || !Language.addTranslations) return;
+		const shared = {
+			'action.preview': ['Preview Minecraft Structure', '预览 Minecraft 结构', '預覽 Minecraft 結構'],
+			'action.performance': ['Building Performance Mode', '建筑性能模式', '建築效能模式'],
+			'action.animation_part': ['Create Animation Part from Selection', '将所选方块设为动画部件', '將所選方塊設為動畫部件'],
+			'form.part_pivot': ['Pivot (model units)', '轴心（模型单位）', '軸心（模型單位）'],
+			'message.part_rotated_parent': ['A parent group is rotated. Reset its base rotation before regrouping this selection.', '所选方块的上级组存在旋转。请先还原上级组的基础旋转，再建立部件。', '所選方塊的上級組存在旋轉。請先還原上級組的基礎旋轉，再建立部件。'],
+			'message.import_busy': ['An import is already running.', '已有导入任务正在运行。', '已有匯入工作正在執行。'],
+			'message.importing': ['Importing Minecraft model', '正在导入 Minecraft 模型', '正在匯入 Minecraft 模型'],
+			'message.import_cancelled': ['Import cancelled; created content was rolled back.', '导入已取消，已撤销本次创建的内容。', '匯入已取消，已復原本次建立的內容。'],
+			'message.unsupported_format': ['The current format (%0) cannot retain these cube textures. Use Java Block/Item, Generic Model, or Animated Java Blueprint.', '当前格式（%0）无法保留这些方块贴图。请使用 Java 方块/物品、通用模型或 Animated Java Blueprint 项目。', '目前格式（%0）無法保留這些方塊貼圖。請使用 Java 方塊/物品、通用模型或 Animated Java Blueprint 專案。'],
+			'message.format_unavailable': ['Format %0 is unavailable. Install and enable Animated Java first.', '找不到格式 %0。请先安装并启用 Animated Java。', '找不到格式 %0。請先安裝並啟用 Animated Java。'],
+			'action.export_textures': ['Export Imported Textures to Resource Pack', '导出导入贴图到资源包', '匯出匯入貼圖到資源包'],
+			'action.export_textures.desc': ['Export OBJ, structure, and generated tiled textures with their resource paths.', '按资源路径导出 OBJ、结构和合并方块的平铺贴图。', '依資源路徑匯出 OBJ、結構及合併方塊的平鋪貼圖。']
+		};
+		const direct = {
+			'dialog.preview': ['Minecraft Structure Preview', 'Minecraft 结构预览', 'Minecraft 結構預覽'],
+			'button.preview': ['Preview', '预览', '預覽'],
+			'button.refresh_preview': ['Refresh preview', '更新预览', '更新預覽'],
+			'button.import_selection': ['Import selection', '导入选区', '匯入選區'],
+			'button.add_part': ['Add animation part from current range', '将当前范围添加为动画部件', '將目前範圍加入動畫部件'],
+			'form.animation_parts': ['Animation parts', '动画部件', '動畫部件'],
+			'form.group_parts': ['Static body and animation parts', '静态主体与动画部件', '靜態主體與動畫部件'],
+			'form.merge_transparent': ['Merge transparent cubes (remove interior faces)', '合并透明完整方块（移除内部面）', '合併透明完整方塊（移除內部面）'],
+			'phase.decompress': ['Decompressing in background', '正在后台解压', '正在背景解壓'],
+			'phase.parse': ['Parsing NBT in background', '正在后台解析 NBT', '正在背景解析 NBT'],
+			'phase.assets': ['Loading texture source', '正在读取贴图来源', '正在讀取貼圖來源'],
+			'phase.scan': ['Scanning selected region in background', '正在后台扫描选区', '正在背景掃描選區'],
+			'message.worker_unavailable': ['Background workers or decompression streams are unavailable. Update Blockbench before importing this structure.', '当前环境不支持后台 Worker 或解压流。请升级 Blockbench 后再导入结构。', '目前環境不支援背景 Worker 或解壓串流。請升級 Blockbench 後再匯入結構。'],
+			'message.preview_stats': ['Selected blocks: %0; preview cells: %1.', '选区方块：%0；低细节预览格：%1。', '選區方塊：%0；低細節預覽格：%1。'],
+			'form.project_format': ['New project format', '新建项目格式', '新建專案格式'],
+			'form.block_scale': ['Block size (Blockbench units)', '每格方块大小（Blockbench 单位）', '每格方塊大小（Blockbench 單位）'],
+			'form.visible_faces_only': ['Remove occluded faces', '剔除被实心方块遮挡的面', '剔除被實心方塊遮擋的面'],
+			'form.merge_full_cubes': ['Merge compatible adjacent models', '合并相邻兼容方块模型', '合併相鄰相容方塊模型'],
+			'form.grouping': ['Grouping', '分组方式', '分組方式'],
+			'form.group_auto': ['Automatic', '自动', '自動'],
+			'form.group_block': ['One group per block', '逐方块分组', '逐方塊分組'],
+			'form.group_chunk': ['Spatial chunks', '按空间分块', '依空間分塊'],
+			'form.group_single': ['Single group', '单组', '單組'],
+			'form.chunk_size': ['Chunk edge length (blocks)', '分块边长（格）', '分塊邊長（格）'],
+			'form.filter_bounds': ['Limit coordinate range', '限制坐标范围', '限制座標範圍'],
+			'form.bounds_min': ['Minimum X / Y / Z', '最小 X / Y / Z', '最小 X / Y / Z'],
+			'form.bounds_max': ['Maximum X / Y / Z', '最大 X / Y / Z', '最大 X / Y / Z'],
+			'form.include_blocks': ['Include block IDs', '只导入这些方块 ID', '只匯入這些方塊 ID'],
+			'form.exclude_blocks': ['Exclude block IDs', '排除这些方块 ID', '排除這些方塊 ID'],
+			'form.source_block_limit': ['Maximum source blocks to process', '最多处理源方块数', '最多處理來源方塊數'],
+			'message.optimization_summary': ['Filtered blocks: %0.\nCubes saved by merging: %1.\nCreated groups: %2.', '筛选排除的方块：%0。\n合并减少的 cube：%1。\n新建分组：%2。', '篩選排除的方塊：%0。\n合併減少的 cube：%1。\n新建分組：%2。'],
+			'message.read_limited': ['The source block limit was reached. Only part of the structure was processed; narrow the coordinate range or increase the source limit.', '已触及源方块读取限制，本次只处理了部分结构。请缩小坐标范围，或提高“最多处理源方块数”后再导入。', '已觸及來源方塊讀取限制，本次只處理了部分結構。請縮小座標範圍，或提高「最多處理來源方塊數」後再匯入。'],
+			'message.merge_limited': ['Generated texture memory reached the import budget (64 MiB of RGBA pixels). Remaining blocks keep individual cubes, subject to the cube limit.', '已达到本次生成贴图的内存预算（64 MiB RGBA 像素）。其余方块保留独立 cube，仍受 cube 数量限制。', '已達到本次生成貼圖的記憶體預算（64 MiB RGBA 像素）。其餘方塊保留獨立 cube，仍受 cube 數量限制。'],
+			'message.failed_chunks': ['Failed to read %0 chunks; those chunks were not imported.', '有 %0 个区块读取失败，这些区块未导入。', '有 %0 個區塊讀取失敗，這些區塊未匯入。'],
+			'message.java_bounds': ['Some coordinates exceed the Java Block/Item range (-16 to 32). Split or scale the model before exporting, or import into Animated Java Blueprint.', '部分坐标超出 Java 方块/物品模型的 -16 到 32 范围。导出前请拆分或缩小模型，也可以导入 Animated Java Blueprint 项目。', '部分座標超出 Java 方塊/物品模型的 -16 到 32 範圍。匯出前請拆分或縮小模型，也可以匯入 Animated Java Blueprint 專案。']
+		};
+		['en', 'zh', 'zh_tw'].forEach((language, index) => {
+			let entries = {};
+			Object.keys(shared).forEach(key => entries[TRANSLATION_PREFIX + key] = shared[key][index]);
+			Object.keys(direct).forEach(key => entries[TRANSLATION_PREFIX + 'direct.' + key] = direct[key][index]);
+			Language.addTranslations(language, entries);
+		});
+	}
+
 	function scheduleRememberPluginInstallation() {
-		rememberPluginInstallation();
-		if (typeof setTimeout === 'function') {
-			setTimeout(rememberPluginInstallation, 0);
-			setTimeout(rememberPluginInstallation, 100);
-			setTimeout(rememberPluginInstallation, 1000);
-		}
+		clearTimeout(installation_timer);
+		installation_timer = setTimeout(rememberPluginInstallation, 100);
 	}
 
 	addTranslations();
 	DirectMinecraftImporter.addTranslations();
 	addMergedTranslations();
 	addDirectImportHotfixTranslations();
+	addOptimizationTranslations();
 
 	Plugin.register(PLUGIN_ID, {
 		title: translate('title'),
@@ -5277,6 +6557,7 @@
 		},
 		onload() {
 			try {
+				viewport_enabled = true;
 				scheduleRememberPluginInstallation();
 				cleanupForeignPluginFeatures();
 				deleteStalePluginActions();
@@ -5324,20 +6605,56 @@
 					plugin: PLUGIN_ID,
 					click: DirectMinecraftImporter.showSettingsDialog
 				});
+				preview_action = new Action('preview_minecraft_structure', {
+					name: translate('action.preview'), icon: 'view_in_ar', category: 'tools', plugin: PLUGIN_ID, click: DirectMinecraftImporter.pickStructurePreview
+				});
+				animation_part_action = new Action('create_minecraft_animation_part', {
+					name: translate('action.animation_part'), icon: 'account_tree', category: 'tools', plugin: PLUGIN_ID,
+					condition: () => Project && Format.bone_rig && !active_import && Cube.selected.some(isCubizerCube), click: createAnimationPartFromSelection
+				});
+				performance_action = new Toggle('minecraft_cubizer_performance', {
+					name: translate('action.performance'), icon: 'speed', category: 'tools', plugin: PLUGIN_ID, default: true,
+					condition: () => Project && !active_import && Cube.all.some(isCubizerCube),
+					onChange(value) { Project[PERFORMANCE_PROPERTY] = value; restoreViewportBatch(); if (!value) releaseUVGuard(); else scheduleViewportBatch(); }
+				});
 				createPluginMenu();
 				compile_listener = Codecs.java_block?.on('compile', patchAllJavaTextureNamespaces);
+				project_texture_listener = Blockbench.on('select_project', refreshTextureFrameLayouts);
+				parsed_texture_listener = Codecs.project?.on('parsed', refreshTextureFrameLayouts);
+				refreshTextureFrameLayouts();
+				for (let event of ['finished_edit', 'undo', 'redo', 'update_selection', 'update_view', 'select_mode', 'change_view_mode', 'change_texture', 'update_texture']) {
+					performance_listeners.push(Blockbench.on(event, () => { restoreViewportBatch(); scheduleViewportBatch(); }));
+				}
+				performance_listeners.push(Blockbench.on('init_edit', restoreViewportBatch));
+				performance_listeners.push(Blockbench.on('unselect_project', () => { restoreViewportBatch(); releaseUVGuard(); }));
+				performance_listeners.push(Blockbench.on('select_project', () => { performance_action.value = Project?.[PERFORMANCE_PROPERTY] !== false; scheduleViewportBatch(); }));
+				performance_listeners.push(Codecs.project?.on('parsed', scheduleViewportBatch));
+				scheduleViewportBatch();
 			} catch (error) {
 				console.error('Minecraft OBJ Cubizer failed to load', error);
 			}
 		},
 		onunload() {
+			viewport_enabled = false;
+			restoreViewportBatch(); releaseUVGuard(); performance_listeners.forEach(listener => listener?.delete()); performance_listeners = [];
+			if (active_import) active_import.cancelled = true;
+			active_import?.worker_session?.dispose();
+			DirectMinecraftImporter.disposePreviewSessions();
+			clearTimeout(installation_timer);
 			deletePluginMenu();
 			if (import_action) import_action.delete();
 			if (settings_action) settings_action.delete();
 			if (export_textures_action) export_textures_action.delete();
 			if (direct_import_action) direct_import_action.delete();
 			if (direct_settings_action) direct_settings_action.delete();
+			preview_action?.delete(); animation_part_action?.delete();
+			performance_action?.delete();
 			if (compile_listener) compile_listener.delete();
+			project_texture_listener?.delete();
+			parsed_texture_listener?.delete();
+			if (typeof ModelProject !== 'undefined') for (let project of ModelProject.all) for (let texture of project.textures) {
+				if (texture.flags?.has('cubizer_frame_layout')) { delete texture.frameCount; delete texture.getMCMetaContent; texture.flags.delete('cubizer_frame_layout'); }
+			}
 			unregisterProperties();
 		}
 	});

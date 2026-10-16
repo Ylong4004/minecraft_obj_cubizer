@@ -3,7 +3,7 @@
 		"title": "Minecraft OBJ Cubizer / Minecraft OBJ 方块转换器",
 		"author": "Ylong",
 		"description": "将 Minecraft OBJ 和结构文件转换为可编辑的 Blockbench Java 方块模型。",
-		"version": "1.4.0",
+		"version": "1.6.1",
 		"icon": "icon.svg",
 		"variant": "desktop",
 		"tags": [
